@@ -5792,8 +5792,16 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
             Some(c) => find_leaf_pane(&c, axis, prefer_start),
             None => widget.clone(),
         }
+    } else if let Some(box_widget) = widget.downcast_ref::<gtk::Box>() {
+        // A gtk::Box may be a pane widget (leaf) or a SplitTreeContainer bin
+        // wrapping a single pane or paned. Descend into non-pane boxes.
+        if !pane::is_pane_widget(widget) {
+            if let Some(first_child) = box_widget.first_child() {
+                return find_leaf_pane(&first_child, axis, prefer_start);
+            }
+        }
+        widget.clone()
     } else {
-        // Leaf pane — this is a pane gtk::Box
         widget.clone()
     }
 }
