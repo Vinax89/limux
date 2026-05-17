@@ -6115,8 +6115,8 @@ mod tests {
         desktop_notification_action_from_signal, desktop_notification_actions,
         desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
-        directional_neighbor_score, favorites_prefix_len, font_size_after_delta,
-        find_leaf_pane, ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
+        directional_neighbor_score, favorites_prefix_len, find_leaf_pane, font_size_after_delta,
+        ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
         next_active_workspace_index, pane_create_split_placement, queue_session_save_request,
         resolve_pane_create_source_id, resolved_system_prefers_dark, sanitize_background_opacity,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
@@ -7035,45 +7035,50 @@ mod tests {
         use gtk4::prelude::{BoxExt, Cast, WidgetExt};
 
         // GTK widget tests need a display. Skip silently on headless CI.
-        if super::gtk::gdk::Display::default().is_none() {
+        if gtk4::init().is_err() {
             return;
         }
-        gtk4::init().unwrap();
 
-        // A plain Box wrapping a single child (simulates SplitTreeContainer bin)
+        let make_pane = || {
+            let pane = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            header.add_css_class("limux-pane-header");
+            pane.append(&header);
+            pane
+        };
+
+        // A plain Box wrapping a single child simulates a SplitTreeContainer bin.
         let bin = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        let inner_pane = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        inner_pane.add_css_class("limux-pane-header");
+        let inner_pane = make_pane();
         bin.append(&inner_pane);
 
         let leaf = find_leaf_pane(&bin.upcast(), gtk4::Orientation::Horizontal, true);
-        assert!(
-            leaf.is_ancestor(&inner_pane),
-            "find_leaf_pane should descend through a non-pane Box and return the inner pane"
+        assert_eq!(
+            leaf,
+            inner_pane.clone().upcast::<gtk4::Widget>(),
+            "find_leaf_pane should descend through a non-pane Box"
         );
 
-        // A Box that IS a pane widget should be returned as-is
-        let pane = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        header.add_css_class("limux-pane-header");
-        pane.append(&header);
+        // A Box that is a pane widget should be returned as-is.
+        let pane = make_pane();
 
         let leaf = find_leaf_pane(&pane.clone().upcast(), gtk4::Orientation::Horizontal, true);
-        assert!(
-            leaf.is_ancestor(&pane),
+        assert_eq!(
+            leaf,
+            pane.clone().upcast::<gtk4::Widget>(),
             "find_leaf_pane should treat a pane Box as a leaf"
         );
 
-        // A Paned should descend to its actual leaf
+        // A Paned should descend to its actual leaf.
         let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
-        let left_pane = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        left_pane.add_css_class("limux-pane-header");
+        let left_pane = make_pane();
         paned.set_start_child(Some(&left_pane));
-        paned.set_end_child(Some(&gtk4::Box::new(gtk4::Orientation::Vertical, 0)));
+        paned.set_end_child(Some(&make_pane()));
 
         let leaf = find_leaf_pane(&paned.upcast(), gtk4::Orientation::Horizontal, true);
-        assert!(
-            leaf.is_ancestor(&left_pane),
+        assert_eq!(
+            leaf,
+            left_pane.clone().upcast::<gtk4::Widget>(),
             "find_leaf_pane should descend through a Paned to its leaf"
         );
     }
