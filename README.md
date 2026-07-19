@@ -124,7 +124,7 @@ Gemini CLI). Every terminal limux spawns auto-exports
 with no flags needed from inside the agent's own terminal.
 
 ```bash
-# Fire a libadwaita toast + sidebar unread badge from any agent
+# Fire a libadwaita toast + tab/workspace unread badges from any agent
 limux notify --subtitle "needs review" --body "blocked on auth choice" "Input needed"
 
 # Install Limux session-restore hooks for supported agents
