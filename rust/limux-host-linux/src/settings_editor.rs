@@ -267,6 +267,19 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     hover_row.set_activatable_widget(Some(&hover_switch));
     group.add(&hover_row);
 
+    let workspace_path_row = adw::ActionRow::builder()
+        .title("Show workspace path")
+        .subtitle("Display workspace folder below its name")
+        .build();
+    workspace_path_row.set_title_lines(1);
+    workspace_path_row.set_subtitle_lines(2);
+    let workspace_path_switch = gtk::Switch::new();
+    workspace_path_switch.set_active(input.config.borrow().appearance.show_workspace_path);
+    workspace_path_switch.set_valign(gtk::Align::Center);
+    workspace_path_row.add_suffix(&workspace_path_switch);
+    workspace_path_row.set_activatable_widget(Some(&workspace_path_switch));
+    group.add(&workspace_path_row);
+
     let auto_copy_row = adw::ActionRow::builder()
         .title("Copy selection automatically")
         .subtitle("Copy selected terminal text to the regular clipboard")
@@ -349,6 +362,16 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
             let hover_terminal_focus = switch.is_active();
             apply_config_change(&config, &*on_changed, move |c| {
                 c.focus.hover_terminal_focus = hover_terminal_focus;
+            });
+        });
+    }
+    {
+        let config = input.config.clone();
+        let on_changed = input.on_config_changed.clone();
+        workspace_path_switch.connect_active_notify(move |switch| {
+            let show_workspace_path = switch.is_active();
+            apply_config_change(&config, &*on_changed, move |c| {
+                c.appearance.show_workspace_path = show_workspace_path;
             });
         });
     }

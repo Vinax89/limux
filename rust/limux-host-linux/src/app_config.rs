@@ -53,11 +53,23 @@ pub struct AppConfig {
     pub font_size: Option<f32>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppearanceConfig {
     pub color_scheme: ColorScheme,
     pub ghostty_color_scheme: ColorScheme,
     pub ui_scale: UiScale,
+    pub show_workspace_path: bool,
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            color_scheme: ColorScheme::default(),
+            ghostty_color_scheme: ColorScheme::default(),
+            ui_scale: UiScale::default(),
+            show_workspace_path: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -289,6 +301,11 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .and_then(UiScale::new)
         .unwrap_or_default();
 
+    let show_workspace_path = appearance
+        .and_then(|appearance| appearance.get("show_workspace_path"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     let notifications = root.get("notifications").and_then(Value::as_object);
     let notification_defaults = NotificationConfig::default();
     let notifications_enabled = notifications
@@ -322,6 +339,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
             color_scheme,
             ghostty_color_scheme,
             ui_scale,
+            show_workspace_path,
         },
         notifications: NotificationConfig {
             enabled: notifications_enabled,
@@ -354,6 +372,10 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
     appearance.insert(
         "ghostty_color_scheme".to_string(),
         json!(config.appearance.ghostty_color_scheme.as_str()),
+    );
+    appearance.insert(
+        "show_workspace_path".to_string(),
+        json!(config.appearance.show_workspace_path),
     );
     if !config.appearance.ui_scale.is_default() {
         appearance.insert(
@@ -488,7 +510,8 @@ fn ensure_default_config_file(path: &Path) -> std::io::Result<()> {
     let default_root = json!({
         "appearance": {
             "color_scheme": "dark",
-            "ghostty_color_scheme": "dark"
+            "ghostty_color_scheme": "dark",
+            "show_workspace_path": true
         },
         "focus": {
             "hover_terminal_focus": false
@@ -571,6 +594,10 @@ mod tests {
         assert_eq!(
             parsed["appearance"]["ghostty_color_scheme"],
             Value::String("dark".to_string())
+        );
+        assert_eq!(
+            parsed["appearance"]["show_workspace_path"],
+            Value::Bool(true)
         );
         assert_eq!(parsed["notifications"]["enabled"], Value::Bool(true));
         assert_eq!(
@@ -721,6 +748,28 @@ mod tests {
     }
 
     #[test]
+    fn load_from_path_reads_workspace_path_visibility() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+        fs::write(
+            &path,
+            r#"{
+  "appearance": {
+    "show_workspace_path": false
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let loaded = load_from_path(&path);
+
+        assert!(loaded.warnings.is_empty());
+        assert!(!loaded.config.appearance.show_workspace_path);
+    }
+
+    #[test]
     fn save_writes_gtk_and_ghostty_color_schemes() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
@@ -758,6 +807,24 @@ mod tests {
         let raw = fs::read_to_string(&path).expect("read config");
         let parsed: Value = serde_json::from_str(&raw).expect("parse config");
         assert_eq!(parsed["appearance"]["ui_scale"], json!(1.5));
+    }
+
+    #[test]
+    fn save_to_path_writes_workspace_path_visibility() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+
+        let mut config = AppConfig::default();
+        config.appearance.show_workspace_path = false;
+        save_to_path(&path, &config).expect("save workspace path visibility");
+
+        let raw = fs::read_to_string(&path).expect("read config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse config");
+        assert_eq!(
+            parsed["appearance"]["show_workspace_path"],
+            Value::Bool(false)
+        );
     }
 
     #[test]
