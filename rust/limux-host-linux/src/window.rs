@@ -5792,8 +5792,16 @@ fn find_leaf_pane(widget: &gtk::Widget, axis: gtk::Orientation, prefer_start: bo
             Some(c) => find_leaf_pane(&c, axis, prefer_start),
             None => widget.clone(),
         }
+    } else if let Some(box_widget) = widget.downcast_ref::<gtk::Box>() {
+        // A gtk::Box may be a pane widget (leaf) or a SplitTreeContainer bin
+        // wrapping a single pane or paned. Descend into non-pane boxes.
+        if !pane::is_pane_widget(widget) {
+            if let Some(first_child) = box_widget.first_child() {
+                return find_leaf_pane(&first_child, axis, prefer_start);
+            }
+        }
+        widget.clone()
     } else {
-        // Leaf pane — this is a pane gtk::Box
         widget.clone()
     }
 }
@@ -6107,7 +6115,7 @@ mod tests {
         desktop_notification_action_from_signal, desktop_notification_actions,
         desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
-        directional_neighbor_score, favorites_prefix_len, font_size_after_delta,
+        directional_neighbor_score, favorites_prefix_len, find_leaf_pane, font_size_after_delta,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
         next_active_workspace_index, pane_create_split_placement, queue_session_save_request,
         resolve_pane_create_source_id, resolved_system_prefers_dark, sanitize_background_opacity,
@@ -7020,5 +7028,58 @@ mod tests {
             .unwrap_err();
 
         assert!(error.ends_with(" is not a folder"));
+    }
+
+    #[test]
+    fn find_leaf_pane_descends_into_non_pane_boxes() {
+        use gtk4::prelude::{BoxExt, Cast, WidgetExt};
+
+        // GTK widget tests need a display. Skip silently on headless CI.
+        if gtk4::init().is_err() {
+            return;
+        }
+
+        let make_pane = || {
+            let pane = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            header.add_css_class("limux-pane-header");
+            pane.append(&header);
+            pane
+        };
+
+        // A plain Box wrapping a single child simulates a SplitTreeContainer bin.
+        let bin = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let inner_pane = make_pane();
+        bin.append(&inner_pane);
+
+        let leaf = find_leaf_pane(&bin.upcast(), gtk4::Orientation::Horizontal, true);
+        assert_eq!(
+            leaf,
+            inner_pane.clone().upcast::<gtk4::Widget>(),
+            "find_leaf_pane should descend through a non-pane Box"
+        );
+
+        // A Box that is a pane widget should be returned as-is.
+        let pane = make_pane();
+
+        let leaf = find_leaf_pane(&pane.clone().upcast(), gtk4::Orientation::Horizontal, true);
+        assert_eq!(
+            leaf,
+            pane.clone().upcast::<gtk4::Widget>(),
+            "find_leaf_pane should treat a pane Box as a leaf"
+        );
+
+        // A Paned should descend to its actual leaf.
+        let paned = gtk4::Paned::new(gtk4::Orientation::Horizontal);
+        let left_pane = make_pane();
+        paned.set_start_child(Some(&left_pane));
+        paned.set_end_child(Some(&make_pane()));
+
+        let leaf = find_leaf_pane(&paned.upcast(), gtk4::Orientation::Horizontal, true);
+        assert_eq!(
+            leaf,
+            left_pane.clone().upcast::<gtk4::Widget>(),
+            "find_leaf_pane should descend through a Paned to its leaf"
+        );
     }
 }
