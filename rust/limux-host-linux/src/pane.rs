@@ -1137,11 +1137,7 @@ fn make_terminal_callbacks(
             if has_custom || title.is_empty() {
                 return;
             }
-            let display = if title.len() > 22 {
-                format!("{}…", &title[..21])
-            } else {
-                title.to_string()
-            };
+            let display = display_terminal_title(title);
             title_label.set_label(&display);
         }),
         on_pwd_changed: Box::new(move |pwd: &str| {
@@ -1233,6 +1229,17 @@ fn make_terminal_callbacks(
             }
         }),
     }
+}
+
+fn display_terminal_title(title: &str) -> String {
+    let mut indices = title.char_indices();
+    let Some((truncate_at, _)) = indices.nth(21) else {
+        return title.to_string();
+    };
+    if indices.next().is_none() {
+        return title.to_string();
+    }
+    format!("{}…", &title[..truncate_at])
 }
 
 fn is_safe_browser_url(url: &str) -> bool {
@@ -3733,19 +3740,35 @@ fn create_browser_widget(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_content_drop_zone, content_drop_preview_rect, effective_drop_target_dimensions,
-        is_localhost_input, is_safe_browser_url, next_active_after_tab_removal,
-        normalize_browser_entry_input, normalize_reorder_insert_index, pane_action_tooltip,
-        surface_hint_matches, ContentDropZone, TabDragPayload, BROWSER_SEARCH_ENTRY_CSS_CLASS,
-        BROWSER_SEARCH_ENTRY_CSS_CLASSES, BROWSER_URL_ENTRY_CSS_CLASS,
-        BROWSER_URL_ENTRY_CSS_CLASSES, HOST_ENTRY_CSS_CLASS, PANE_CSS, TAB_RENAME_ENTRY_CSS_CLASS,
-        TAB_RENAME_ENTRY_CSS_CLASSES,
+        classify_content_drop_zone, content_drop_preview_rect, display_terminal_title,
+        effective_drop_target_dimensions, is_localhost_input, is_safe_browser_url,
+        next_active_after_tab_removal, normalize_browser_entry_input,
+        normalize_reorder_insert_index, pane_action_tooltip, surface_hint_matches, ContentDropZone,
+        TabDragPayload, BROWSER_SEARCH_ENTRY_CSS_CLASS, BROWSER_SEARCH_ENTRY_CSS_CLASSES,
+        BROWSER_URL_ENTRY_CSS_CLASS, BROWSER_URL_ENTRY_CSS_CLASSES, HOST_ENTRY_CSS_CLASS, PANE_CSS,
+        TAB_RENAME_ENTRY_CSS_CLASS, TAB_RENAME_ENTRY_CSS_CLASSES,
     };
     #[cfg(feature = "webkit")]
     use super::{
         env_value_contains_token, is_kde_wayland_session_from_env, BROWSER_WEB_VIEW_CSS_CLASS,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
+
+    #[test]
+    fn terminal_title_truncation_preserves_utf8_boundaries() {
+        let short_unicode = "12345678901234567890🚀x";
+        let long_unicode = "12345678901234567890🚀xyz";
+
+        assert_eq!(display_terminal_title(short_unicode), short_unicode);
+        assert_eq!(
+            display_terminal_title(long_unicode),
+            "12345678901234567890🚀…"
+        );
+        assert_eq!(
+            display_terminal_title("12345678901234567890123"),
+            "123456789012345678901…"
+        );
+    }
 
     #[test]
     fn pane_action_tooltip_reflects_remaps_and_unbinds() {
