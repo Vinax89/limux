@@ -23,13 +23,13 @@ Download the latest release from [GitHub Releases](https://github.com/am-will/li
 
 **Debian/Ubuntu (.deb)** — recommended:
 ```bash
-sudo dpkg -i ./limux_0.1.20_amd64.deb
+sudo dpkg -i ./limux_*_amd64.deb
 ```
 
 **AppImage** — portable across Ubuntu 24.04-era desktops and newer, no install needed:
 ```bash
-chmod +x Limux-0.1.20-x86_64.AppImage
-./Limux-0.1.20-x86_64.AppImage
+chmod +x Limux-*-x86_64.AppImage
+./Limux-*-x86_64.AppImage
 ```
 
 Release AppImages are built and checked on the Ubuntu 24.04 `GLIBC_2.39`
@@ -114,6 +114,7 @@ Run the canonical local quality gate before committing:
 ```
 
 Repository maintainability rules live in [`docs/maintainability.md`](docs/maintainability.md).
+Release procedure lives in [`docs/releasing.md`](docs/releasing.md).
 
 ## Agent integrations
 
