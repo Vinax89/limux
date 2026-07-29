@@ -199,7 +199,7 @@ fn parse_global_args() -> Result<GlobalOptions> {
 
 fn print_help() {
     println!(
-        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]\n      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
+        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]\n      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
     );
 }
 
@@ -802,16 +802,27 @@ async fn run_send_key(client: &mut Client, args: &[String]) -> Result<Value> {
 /// `limux notify` — post a notification into the sidebar + toast overlay.
 ///
 /// Usage:
-///   limux notify [--workspace <id|ref>] [--subtitle <text>] [--body <text>] <title>
+///   limux notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] <title>
 ///   limux notify --title "..." --subtitle "..." --body "..."
 ///
 /// Mirrors the `cmux notify` shape (title / subtitle / body). Title is
 /// required; subtitle and body are optional. Falls back to the current
 /// workspace via LIMUX_WORKSPACE_ID when --workspace isn't given.
+fn notification_surface_target(
+    args: &[String],
+    mut env_value: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    parse_opt(args, "--surface")
+        .or_else(|| env_value("LIMUX_TAB_ID"))
+        .or_else(|| env_value("LIMUX_SURFACE_ID"))
+        .filter(|value| !value.is_empty())
+}
+
 async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
+    let surface = notification_surface_target(args, |key| env::var(key).ok());
 
     // Title can be provided either via --title or as the trailing positional
     // (matching `limux send`'s ergonomics).
@@ -831,6 +842,9 @@ async fn run_notify(client: &mut Client, args: &[String]) -> Result<Value> {
     }
     if !body.is_empty() {
         params.insert("body".to_string(), Value::String(body));
+    }
+    if let Some(surface) = surface {
+        params.insert("surface_id".to_string(), Value::String(surface));
     }
 
     call_in_workspace_scope(
@@ -968,6 +982,7 @@ async fn run_agent_hook(
     let workspace = parse_opt(args, "--workspace")
         .or_else(|| env::var("LIMUX_WORKSPACE_ID").ok())
         .filter(|s| !s.is_empty());
+    let surface = notification_surface_target(args, |key| env::var(key).ok());
 
     let mut params = Map::new();
     params.insert("title".to_string(), Value::String(title));
@@ -976,6 +991,9 @@ async fn run_agent_hook(
     }
     if !body.is_empty() {
         params.insert("body".to_string(), Value::String(body));
+    }
+    if let Some(surface) = surface {
+        params.insert("surface_id".to_string(), Value::String(surface));
     }
 
     let _ = call_in_workspace_scope(
@@ -3698,6 +3716,24 @@ mod cli_arg_tests {
         ]);
 
         assert_eq!(trailing_title(&args).as_deref(), Some("Input needed"));
+    }
+
+    #[test]
+    fn notification_target_prefers_explicit_surface_then_stable_tab_id() {
+        let env_value = |key: &str| match key {
+            "LIMUX_TAB_ID" => Some("tab-stable".to_string()),
+            "LIMUX_SURFACE_ID" => Some("1:tab-stable".to_string()),
+            _ => None,
+        };
+
+        assert_eq!(
+            notification_surface_target(&args(&["--surface", "2:explicit"]), env_value),
+            Some("2:explicit".to_string())
+        );
+        assert_eq!(
+            notification_surface_target(&[], env_value),
+            Some("tab-stable".to_string())
+        );
     }
 
     #[test]

@@ -50,7 +50,7 @@ struct Workspace {
     notify_dot: gtk::Label,
     /// Notification message label in the sidebar row.
     notify_label: gtk::Label,
-    /// Whether this workspace has unread notifications.
+    /// Unread state for notifications without a tab target.
     unread: bool,
     /// Whether this workspace is favorited/pinned to top.
     favorite: bool,
@@ -1586,6 +1586,22 @@ pub fn build_window(app: &adw::Application) {
 
     {
         let state = state.clone();
+        window.connect_is_active_notify(move |window| {
+            if !window.is_active() {
+                return;
+            }
+            let workspace_id = state
+                .borrow()
+                .active_workspace()
+                .map(|workspace| workspace.id.clone());
+            if let Some(workspace_id) = workspace_id {
+                clear_visible_tab_unread(&state, &workspace_id);
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
         let system_prefers_dark = system_prefers_dark.clone();
         style_manager.connect_dark_notify(move |style_manager| {
             sync_ghostty_color_scheme_for_config(
@@ -2721,8 +2737,26 @@ fn activate_desktop_notification_target(
 }
 
 fn focus_desktop_notification_target(state: &State, target: &DesktopNotificationTarget) -> bool {
+    let workspace = {
+        let s = state.borrow();
+        s.workspaces
+            .iter()
+            .find(|workspace| workspace.id == target.workspace_id)
+            .map(|workspace| (workspace.root.clone(), workspace.split_container.clone()))
+    };
+
     if let Some(pane_id) = target.pane_id {
         if let Some(pane_widget) = pane::find_pane_widget_by_id(pane_id) {
+            if let Some((root, container)) = workspace.as_ref() {
+                if !pane_widget.is_ancestor(root) {
+                    if let Some(tab_id) = target.tab_id.as_deref() {
+                        pane::activate_tab_in_pane(&pane_widget, tab_id);
+                    }
+                    if container.reveal_pane(&pane_widget) {
+                        return true;
+                    }
+                }
+            }
             if let Some(tab_id) = target.tab_id.as_deref() {
                 if pane::activate_tab_in_pane(&pane_widget, tab_id) {
                     return true;
@@ -2735,15 +2769,7 @@ fn focus_desktop_notification_target(state: &State, target: &DesktopNotification
         }
     }
 
-    let root = {
-        let s = state.borrow();
-        s.workspaces
-            .iter()
-            .find(|workspace| workspace.id == target.workspace_id)
-            .map(|workspace| workspace.root.clone())
-    };
-
-    if let Some(root) = root {
+    if let Some((root, _)) = workspace {
         focus_workspace_entrypoint(&root);
         return true;
     }
@@ -4466,6 +4492,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
         }
         ControlCommand::CreateNotification {
             target,
+            surface_hint,
             title,
             subtitle,
             body,
@@ -4478,14 +4505,28 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 workspace_index_for_target(&app_state, &target)
             };
 
-            let Some(index) = resolved else {
+            let Some(preferred_index) = resolved else {
                 let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
                     "workspace not found",
                 )));
                 return;
             };
 
-            let ws_id = state.borrow().workspaces[index].id.clone();
+            let (index, tab_target) = surface_hint
+                .as_deref()
+                .map(|surface| resolve_notification_tab_target(state, preferred_index, surface))
+                .unwrap_or((preferred_index, None));
+
+            let (ws_id, root, workspace_is_active, window_active) = {
+                let s = state.borrow();
+                let workspace = &s.workspaces[index];
+                (
+                    workspace.id.clone(),
+                    workspace.root.clone(),
+                    index == s.active_idx,
+                    s.window.is_active(),
+                )
+            };
 
             // Build the sidebar message: title becomes the bold prefix,
             // subtitle + body are joined with " — " for the body text.
@@ -4496,13 +4537,18 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 (false, false) => format!("{subtitle} — {body}"),
             };
             let message = workspace_notification_message(&title, &combined_body);
+            let source_focused = tab_target.as_ref().is_some_and(|(pane_id, tab_id)| {
+                window_active
+                    && workspace_is_active
+                    && pane::tab_is_visible_in_workspace(&ws_id, &root, *pane_id, tab_id)
+            });
             let target = DesktopNotificationTarget {
                 workspace_id: ws_id.clone(),
-                pane_id: None,
-                tab_id: None,
+                pane_id: tab_target.as_ref().map(|(pane_id, _)| *pane_id),
+                tab_id: tab_target.map(|(_, tab_id)| tab_id),
             };
             if let Some(request) =
-                mark_workspace_unread_with_message(state, &ws_id, &message, false, target)
+                mark_workspace_unread_with_message(state, &ws_id, &message, source_focused, target)
             {
                 show_desktop_notification(state, request);
             }
@@ -4597,12 +4643,16 @@ pub(crate) fn create_pane_for_workspace(
     let state_for_keybinds = state.clone();
     let state_for_pwd = state.clone();
     let state_for_empty = state.clone();
+    let state_for_unread = state.clone();
+    let state_for_visibility = state.clone();
     let ws_id_split = ws_id.to_string();
     let ws_id_close = ws_id.to_string();
     let ws_id_bell = ws_id.to_string();
     let ws_id_desktop_notification = ws_id.to_string();
     let ws_id_pwd = ws_id.to_string();
     let ws_id_empty = ws_id.to_string();
+    let ws_id_unread = ws_id.to_string();
+    let ws_id_visibility = ws_id.to_string();
     let state_for_split_with_tab = state.clone();
     let state_for_config = state.clone();
     let state_for_config_changed = state.clone();
@@ -4610,6 +4660,7 @@ pub(crate) fn create_pane_for_workspace(
     let ws_id_for_env = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
+        workspace_id: ws_id.to_string(),
         on_split: Box::new(move |pane_widget, orientation| {
             split_pane(
                 &state_for_split,
@@ -4703,6 +4754,16 @@ pub(crate) fn create_pane_for_workspace(
         on_state_changed: Box::new({
             let state = state.clone();
             move || request_session_save(&state)
+        }),
+        on_unread_changed: Box::new(move || {
+            sync_workspace_unread(&state_for_unread, &ws_id_unread);
+        }),
+        is_pane_visible: Box::new(move |pane_widget| {
+            let s = state_for_visibility.borrow();
+            s.window.is_active()
+                && s.active_workspace().is_some_and(|workspace| {
+                    workspace.id == ws_id_visibility && pane_widget.is_ancestor(&workspace.root)
+                })
         }),
         on_split_with_tab: Box::new(
             move |source_pane, target_pane, orientation, tab_id, new_pane_first| {
@@ -4830,46 +4891,34 @@ fn close_workspace_by_id_internal(
 }
 
 fn switch_workspace(state: &State, idx: usize) {
-    let (stack, stack_name, unread_handles, focus_root) = {
-        let mut s = state.borrow_mut();
-        if idx >= s.workspaces.len() || idx == s.active_idx {
+    let active_workspace_id = {
+        let s = state.borrow();
+        if idx >= s.workspaces.len() {
             return;
         }
+        (idx == s.active_idx).then(|| s.workspaces[idx].id.clone())
+    };
+    if let Some(workspace_id) = active_workspace_id {
+        clear_visible_tab_unread(state, &workspace_id);
+        return;
+    }
+
+    let (stack, stack_name, focus_root, workspace_id) = {
+        let mut s = state.borrow_mut();
         s.active_idx = idx;
         let stack = s.stack.clone();
         let stack_name = format!("ws-{}", s.workspaces[idx].id);
         let focus_root = s.workspaces[idx].root.clone();
+        let workspace_id = s.workspaces[idx].id.clone();
 
-        let unread_handles = if s.workspaces[idx].unread {
-            let ws = &mut s.workspaces[idx];
-            ws.unread = false;
-            Some((
-                ws.notify_dot.clone(),
-                ws.notify_label.clone(),
-                ws.sidebar_row.clone(),
-            ))
-        } else {
-            None
-        };
-
-        (stack, stack_name, unread_handles, focus_root)
+        (stack, stack_name, focus_root, workspace_id)
     };
 
     stack.set_visible_child_name(&stack_name);
+    clear_visible_tab_unread(state, &workspace_id);
     glib::idle_add_local_once(move || {
         focus_workspace_entrypoint(&focus_root);
     });
-
-    if let Some((notify_dot, notify_label, sidebar_row)) = unread_handles {
-        notify_dot.remove_css_class("limux-notify-dot");
-        notify_dot.add_css_class("limux-notify-dot-hidden");
-        notify_label.remove_css_class("limux-notify-msg-unread");
-        notify_label.add_css_class("limux-notify-msg");
-        notify_label.set_visible(false);
-        if let Some(row_box) = sidebar_row.child() {
-            row_box.remove_css_class("limux-sidebar-row-unread");
-        }
-    }
 
     request_session_save(state);
 }
@@ -5153,7 +5202,11 @@ fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, p
     }
 
     // Mutate the data model and trigger async widget tree rebuild
-    container.remove(pane_widget);
+    if !container.remove(pane_widget) {
+        return;
+    }
+    pane::retire_pane(pane_widget);
+    sync_workspace_unread(state, ws_id);
 
     if persist {
         request_session_save(state);
@@ -5754,6 +5807,119 @@ fn should_emit_desktop_notification(
     desktop_notifications_enabled && (!window_active || !workspace_is_active || !source_focused)
 }
 
+fn resolve_notification_tab_target(
+    state: &State,
+    preferred_index: usize,
+    surface_hint: &str,
+) -> (usize, Option<(u32, String)>) {
+    let workspace_ids = state
+        .borrow()
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.id.clone())
+        .collect::<Vec<_>>();
+
+    match pane::tab_target_for_workspace(&workspace_ids[preferred_index], surface_hint) {
+        pane::TabTargetResolution::Unique(pane_id, tab_id) => {
+            return (preferred_index, Some((pane_id, tab_id)));
+        }
+        pane::TabTargetResolution::Ambiguous => return (preferred_index, None),
+        pane::TabTargetResolution::NotFound => {}
+    }
+
+    let mut target = None;
+    for (index, workspace_id) in workspace_ids.iter().enumerate() {
+        if index == preferred_index {
+            continue;
+        }
+        match pane::tab_target_for_workspace(workspace_id, surface_hint) {
+            pane::TabTargetResolution::Unique(pane_id, tab_id) if target.is_none() => {
+                target = Some((index, pane_id, tab_id));
+            }
+            pane::TabTargetResolution::Unique(_, _) | pane::TabTargetResolution::Ambiguous => {
+                return (preferred_index, None);
+            }
+            pane::TabTargetResolution::NotFound => {}
+        }
+    }
+
+    target
+        .map(|(index, pane_id, tab_id)| (index, Some((pane_id, tab_id))))
+        .unwrap_or((preferred_index, None))
+}
+
+fn has_unread(workspace_unread: bool, tab_unread: bool) -> bool {
+    workspace_unread || tab_unread
+}
+
+fn set_workspace_unread_visual(workspace: &Workspace, unread: bool) {
+    if unread {
+        workspace
+            .notify_dot
+            .remove_css_class("limux-notify-dot-hidden");
+        workspace.notify_dot.add_css_class("limux-notify-dot");
+        workspace.notify_label.remove_css_class("limux-notify-msg");
+        workspace
+            .notify_label
+            .add_css_class("limux-notify-msg-unread");
+        workspace
+            .notify_label
+            .set_visible(!workspace.notify_label.label().is_empty());
+        if let Some(row_box) = workspace.sidebar_row.child() {
+            row_box.add_css_class("limux-sidebar-row-unread");
+        }
+    } else {
+        workspace.notify_dot.remove_css_class("limux-notify-dot");
+        workspace
+            .notify_dot
+            .add_css_class("limux-notify-dot-hidden");
+        workspace
+            .notify_label
+            .remove_css_class("limux-notify-msg-unread");
+        workspace.notify_label.add_css_class("limux-notify-msg");
+        workspace.notify_label.set_visible(false);
+        workspace.notify_label.set_label("");
+        if let Some(row_box) = workspace.sidebar_row.child() {
+            row_box.remove_css_class("limux-sidebar-row-unread");
+        }
+    }
+}
+
+fn sync_workspace_unread(state: &State, ws_id: &str) {
+    let workspace_unread = {
+        let s = state.borrow();
+        let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) else {
+            return;
+        };
+        workspace.unread
+    };
+    let tab_unread = pane::workspace_has_unread_tabs(ws_id);
+    let s = state.borrow();
+    if let Some(workspace) = s.workspaces.iter().find(|workspace| workspace.id == ws_id) {
+        set_workspace_unread_visual(workspace, has_unread(workspace_unread, tab_unread));
+    }
+}
+
+fn clear_visible_tab_unread(state: &State, ws_id: &str) {
+    let root = {
+        let mut s = state.borrow_mut();
+        if !s.window.is_active() {
+            return;
+        }
+        let Some(workspace) = s
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == ws_id)
+        else {
+            return;
+        };
+        workspace.unread = false;
+        workspace.root.clone()
+    };
+    pane::clear_active_tab_unread_in_root(&root);
+    sync_workspace_unread(state, ws_id);
+}
+
 fn mark_workspace_unread(
     state: &State,
     ws_id: &str,
@@ -5787,48 +5953,62 @@ fn mark_workspace_unread_with_message(
     source_focused: bool,
     target: DesktopNotificationTarget,
 ) -> Option<DesktopNotificationRequest> {
-    let mut s = state.borrow_mut();
-    let active_idx = s.active_idx;
-    let window_active = s.window.is_active();
-    let notifications = s.config.borrow().notifications;
-    if let Some((idx, ws)) = s
-        .workspaces
-        .iter_mut()
-        .enumerate()
-        .find(|(_, w)| w.id == ws_id)
-    {
-        let workspace_is_active = idx == active_idx;
-        let desktop_request = should_emit_desktop_notification(
-            notifications.enabled,
-            window_active,
-            workspace_is_active,
-            source_focused,
+    let (workspace_idx, active_idx, workspace_name, window_active, notifications) = {
+        let s = state.borrow();
+        let workspace_idx = s
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == ws_id)?;
+        let workspace = &s.workspaces[workspace_idx];
+        let notifications = s.config.borrow().notifications;
+        (
+            workspace_idx,
+            s.active_idx,
+            workspace.name.clone(),
+            s.window.is_active(),
+            notifications,
         )
-        .then(|| DesktopNotificationRequest {
-            summary: ws.name.clone(),
-            body: message.to_string(),
-            sound: notifications.sound,
-            target: target.clone(),
-        });
+    };
+    let workspace_is_active = workspace_idx == active_idx;
+    let desktop_request = should_emit_desktop_notification(
+        notifications.enabled,
+        window_active,
+        workspace_is_active,
+        source_focused,
+    )
+    .then(|| DesktopNotificationRequest {
+        summary: workspace_name,
+        body: message.to_string(),
+        sound: notifications.sound,
+        target: target.clone(),
+    });
 
-        if idx != active_idx {
-            ws.unread = true;
-            ws.notify_dot.remove_css_class("limux-notify-dot-hidden");
-            ws.notify_dot.add_css_class("limux-notify-dot");
-            ws.notify_label.set_label(message);
-            ws.notify_label.remove_css_class("limux-notify-msg");
-            ws.notify_label.add_css_class("limux-notify-msg-unread");
-            ws.notify_label.set_visible(true);
-            // Add glow pulse to the sidebar row box
-            if let Some(row_box) = ws.sidebar_row.child() {
-                row_box.add_css_class("limux-sidebar-row-unread");
+    let source_is_unread = !window_active || !workspace_is_active || !source_focused;
+    if source_is_unread {
+        let tab_target = target.pane_id.zip(target.tab_id.as_deref());
+        let tab_was_targeted = tab_target
+            .and_then(|(pane_id, tab_id)| {
+                pane::mark_tab_unread_in_workspace(ws_id, pane_id, tab_id)
+            })
+            .is_some();
+        let mark_workspace_level = !tab_was_targeted;
+
+        if tab_was_targeted || mark_workspace_level {
+            let mut s = state.borrow_mut();
+            if let Some(workspace) = s
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == ws_id)
+            {
+                workspace.unread |= mark_workspace_level;
+                workspace.notify_label.set_label(message);
             }
+            drop(s);
+            sync_workspace_unread(state, ws_id);
         }
-
-        return desktop_request;
     }
 
-    None
+    desktop_request
 }
 
 fn desktop_notification_hints(
@@ -5928,9 +6108,9 @@ mod tests {
         desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, favorites_prefix_len, font_size_after_delta,
-        ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, next_active_workspace_index,
-        pane_create_split_placement, queue_session_save_request, resolve_pane_create_source_id,
-        resolved_system_prefers_dark, sanitize_background_opacity,
+        ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
+        next_active_workspace_index, pane_create_split_placement, queue_session_save_request,
+        resolve_pane_create_source_id, resolved_system_prefers_dark, sanitize_background_opacity,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
@@ -6397,6 +6577,13 @@ mod tests {
             false, false, false, false
         ));
         assert!(!should_emit_desktop_notification(true, true, true, true));
+    }
+
+    #[test]
+    fn workspace_badge_stays_unread_while_any_tab_is_unread() {
+        assert!(has_unread(false, true));
+        assert!(has_unread(true, false));
+        assert!(!has_unread(false, false));
     }
 
     #[test]
