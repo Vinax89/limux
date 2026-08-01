@@ -5411,7 +5411,34 @@ fn broadcast_font_size(size: f32) {
     crate::terminal::broadcast_binding_action(&action);
 }
 
+fn browser_command_requires_existing_target(command: ShortcutCommand) -> bool {
+    command != ShortcutCommand::OpenBrowserInSplit
+}
+
 fn dispatch_browser_command(state: &State, command: ShortcutCommand) -> bool {
+    if !browser_command_requires_existing_target(command) {
+        let uri = match focused_shortcut_target(state) {
+            pane::FocusedShortcutTarget::Browser(target) => target.current_uri(),
+            _ => None,
+        };
+        let Some((ws_id, pane_widget)) = find_leaf_focused_pane(state) else {
+            return false;
+        };
+        return split_pane(
+            state,
+            &ws_id,
+            &pane_widget,
+            gtk::Orientation::Horizontal,
+            SplitPaneOptions {
+                initial_state: Some(PaneState::browser_only(uri.as_deref())),
+                skip_default_tab: false,
+                new_pane_first: false,
+                persist: true,
+            },
+        )
+        .is_some();
+    }
+
     let pane::FocusedShortcutTarget::Browser(target) = focused_shortcut_target(state) else {
         return false;
     };
@@ -5428,25 +5455,6 @@ fn dispatch_browser_command(state: &State, command: ShortcutCommand) -> bool {
         ShortcutCommand::SurfaceFindPrevious => target.find_previous(),
         ShortcutCommand::SurfaceFindHide => target.hide_find(),
         ShortcutCommand::SurfaceUseSelectionForFind => target.use_selection_for_find(),
-        ShortcutCommand::OpenBrowserInSplit => {
-            let uri = target.current_uri();
-            let Some((ws_id, pane_widget)) = find_leaf_focused_pane(state) else {
-                return false;
-            };
-            split_pane(
-                state,
-                &ws_id,
-                &pane_widget,
-                gtk::Orientation::Horizontal,
-                SplitPaneOptions {
-                    initial_state: Some(PaneState::browser_only(uri.as_deref())),
-                    skip_default_tab: false,
-                    new_pane_first: false,
-                    persist: true,
-                },
-            )
-            .is_some()
-        }
         _ => false,
     }
 }
@@ -6114,9 +6122,9 @@ mod tests {
     use super::gtk::gdk;
     use super::ToVariant;
     use super::{
-        build_window_css, clamp_workspace_insert_index_for_pinning,
-        desktop_notification_action_from_signal, desktop_notification_actions,
-        desktop_notification_activation_token_from_signal,
+        browser_command_requires_existing_target, build_window_css,
+        clamp_workspace_insert_index_for_pinning, desktop_notification_action_from_signal,
+        desktop_notification_actions, desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, favorites_prefix_len, find_leaf_pane, font_size_after_delta,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
@@ -6917,6 +6925,16 @@ mod tests {
         ));
         assert!(!shortcut_allowed_while_browser_find_active(
             ShortcutCommand::SurfaceFind
+        ));
+    }
+
+    #[test]
+    fn open_browser_in_split_does_not_require_an_existing_browser_target() {
+        assert!(!browser_command_requires_existing_target(
+            ShortcutCommand::OpenBrowserInSplit
+        ));
+        assert!(browser_command_requires_existing_target(
+            ShortcutCommand::BrowserReload
         ));
     }
 
