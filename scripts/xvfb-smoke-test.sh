@@ -271,7 +271,20 @@ done
   || { echo "FAIL: terminal command did not execute"; exit 1; }
 grep -Fq "$SCREEN_PROOF" "$LOG_DIR/stage1-screen.txt" \
   || { echo "FAIL: terminal output was not readable through read-screen"; exit 1; }
-echo "stage 1b: OK (surface realized, terminal command executed, screen readable)"
+
+SHIFTED_KEY_PROOF="$DEMO_DIR/shifted-key-proof"
+"$LIMUX_CLI" send --workspace limux "printf '" >"$LOG_DIR/stage1-shifted-prefix.txt"
+"$LIMUX_CLI" send-key --workspace limux '<Shift>a' >"$LOG_DIR/stage1-shifted-letter.txt"
+"$LIMUX_CLI" send-key --workspace limux '<Shift>1' >"$LOG_DIR/stage1-shifted-symbol.txt"
+"$LIMUX_CLI" send --workspace limux "' > '$SHIFTED_KEY_PROOF'" >"$LOG_DIR/stage1-shifted-suffix.txt"
+"$LIMUX_CLI" send-key --workspace limux Enter >"$LOG_DIR/stage1-shifted-enter.txt"
+for _ in $(seq 1 50); do
+  [ -f "$SHIFTED_KEY_PROOF" ] && break
+  sleep 0.1
+done
+[ "$(cat "$SHIFTED_KEY_PROOF" 2>/dev/null)" = 'A!' ] \
+  || { echo "FAIL: shifted send-key did not produce A!"; exit 1; }
+echo "stage 1b: OK (surface realized, terminal I/O and shifted keys verified)"
 
 # --- 5. Stage 2: live agent-team ------------------------------------------
 echo

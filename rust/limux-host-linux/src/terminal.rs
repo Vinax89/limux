@@ -199,7 +199,9 @@ impl TerminalHandle {
         // Enter and ctrl-chords must be *encoded* by ghostty from the key + mods, not
         // written as literal bytes.
         let keycode = keycode_for_keyval(self.gl_area.upcast_ref(), keyval);
-        let text = key_event_text(keyval);
+        let text_keyval =
+            translated_keyval_for_keycode(self.gl_area.upcast_ref(), keyval, keycode, modifier);
+        let text = key_event_text(text_keyval);
 
         let mut press = translate_key_event(
             GHOSTTY_ACTION_PRESS,
@@ -2115,6 +2117,34 @@ fn keycode_for_keyval(widget: &gtk::Widget, keyval: gtk::gdk::Key) -> u32 {
         .map_keyval(keyval)
         .and_then(|keys| keys.first().map(|key| key.keycode()))
         .unwrap_or(0)
+}
+
+fn translated_keyval_for_keycode(
+    widget: &gtk::Widget,
+    keyval: gtk::gdk::Key,
+    keycode: u32,
+    modifier: gtk::gdk::ModifierType,
+) -> gtk::gdk::Key {
+    if keycode == 0 {
+        return keyval;
+    }
+
+    let display = widget.display();
+    let group = display
+        .map_keyval(keyval)
+        .and_then(|mappings| {
+            mappings
+                .iter()
+                .find(|mapping| mapping.keycode() == keycode)
+                .or_else(|| mappings.first())
+                .map(|mapping| mapping.group())
+        })
+        .unwrap_or(0);
+
+    display
+        .translate_key(keycode, modifier, group)
+        .map(|(translated, _, _, _)| translated)
+        .unwrap_or(keyval)
 }
 
 fn key_event_text(keyval: gtk::gdk::Key) -> Option<CString> {
