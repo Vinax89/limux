@@ -155,8 +155,8 @@ fn send_pane_create_response_after_command(
     reply: std::sync::mpsc::Sender<Result<serde_json::Value, BridgeError>>,
 ) {
     let mut attempts = 0;
+    let mut command_sent = false;
     let mut reply = Some(reply);
-    let command = format!("{command}\n");
 
     glib::timeout_add_local(
         std::time::Duration::from_millis(PANE_CREATE_COMMAND_READY_INTERVAL_MS),
@@ -166,7 +166,10 @@ fn send_pane_create_response_after_command(
             if let Some((matched_surface_id, handle)) =
                 pane::exact_terminal_handle_for_surface(&pane_widget, &surface_id)
             {
-                if matched_surface_id == surface_id && handle.send_text(&command) {
+                if matched_surface_id == surface_id && !command_sent {
+                    command_sent = handle.send_text(&command);
+                }
+                if command_sent && handle.send_key("Enter") {
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(Ok(response.clone()));
                     }
