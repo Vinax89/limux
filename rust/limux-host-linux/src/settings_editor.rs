@@ -143,7 +143,11 @@ pub fn present_settings_dialog(parent: &impl IsA<gtk::Widget>, input: SettingsEd
     window.present();
 }
 
-fn apply_config_change<F, G>(config: &Rc<RefCell<AppConfig>>, on_changed: &F, update: G)
+fn apply_config_change<F, G>(
+    config: &Rc<RefCell<AppConfig>>,
+    on_changed: &F,
+    update: G,
+) -> AppConfig
 where
     F: Fn(&AppConfig, &AppConfig) + ?Sized,
     G: FnOnce(&mut AppConfig),
@@ -156,6 +160,7 @@ where
         (previous, updated)
     };
     on_changed(&previous, &updated);
+    config.borrow().clone()
 }
 
 fn build_settings_window_content(window: &adw::Window, input: SettingsEditorInput) -> gtk::Widget {
@@ -368,11 +373,22 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     {
         let config = input.config.clone();
         let on_changed = input.on_config_changed.clone();
+        let syncing = Rc::new(Cell::new(false));
         workspace_path_switch.connect_active_notify(move |switch| {
+            if syncing.get() {
+                return;
+            }
             let show_workspace_path = switch.is_active();
-            apply_config_change(&config, &*on_changed, move |c| {
+            let effective = apply_config_change(&config, &*on_changed, move |c| {
                 c.appearance.show_workspace_path = show_workspace_path;
-            });
+            })
+            .appearance
+            .show_workspace_path;
+            if switch.is_active() != effective {
+                syncing.set(true);
+                switch.set_active(effective);
+                syncing.set(false);
+            }
         });
     }
     {
@@ -503,20 +519,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn apply_config_change_allows_reentrant_config_sync() {
+    fn apply_config_change_returns_reentrant_config_state() {
         let config = Rc::new(RefCell::new(AppConfig::default()));
 
-        apply_config_change(
+        let effective = apply_config_change(
             &config,
-            &|_previous, updated| {
-                config.borrow_mut().clone_from(updated);
+            &|previous, _updated| {
+                config.borrow_mut().clone_from(previous);
             },
             |current| {
                 current.focus.hover_terminal_focus = true;
             },
         );
 
-        assert!(config.borrow().focus.hover_terminal_focus);
+        assert!(!effective.focus.hover_terminal_focus);
+        assert!(!config.borrow().focus.hover_terminal_focus);
     }
 
     #[test]
