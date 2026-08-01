@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 fn main() {
     // Find libghostty relative to the workspace root.
@@ -21,7 +21,12 @@ fn main() {
         cc::Build::new()
             .file(&glad_src)
             .include(&glad_include)
+            .cargo_metadata(false)
             .compile("glad");
+
+        let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
+        println!("cargo:rustc-link-search=native={}", out_dir.display());
+        println!("cargo:rustc-link-lib=static:+whole-archive=glad");
     }
 
     // Re-run if libghostty changes
