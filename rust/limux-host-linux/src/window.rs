@@ -59,7 +59,6 @@ struct Workspace {
     /// The folder path this workspace was opened with.
     folder_path: Option<String>,
     /// Path label shown below workspace name in sidebar.
-    #[allow(dead_code)]
     path_label: gtk::Label,
 }
 
@@ -2882,6 +2881,7 @@ fn activate_last_workspace_shortcut(state: &State) {
 fn build_sidebar_row(
     name: &str,
     folder_path: Option<&str>,
+    show_workspace_path: bool,
 ) -> (
     gtk::ListBoxRow,
     gtk::Label,
@@ -2923,10 +2923,8 @@ fn build_sidebar_row(
     if let Some(p) = folder_path {
         path_label.set_label(&abbreviate_path(p));
         path_label.set_tooltip_text(Some(p));
-        path_label.set_visible(true);
-    } else {
-        path_label.set_visible(false);
     }
+    path_label.set_visible(workspace_path_visible(folder_path, show_workspace_path));
 
     let notify_label = gtk::Label::builder()
         .xalign(0.0)
@@ -2956,6 +2954,20 @@ fn build_sidebar_row(
         notify_label,
         path_label,
     )
+}
+
+fn workspace_path_visible(folder_path: Option<&str>, show_workspace_path: bool) -> bool {
+    show_workspace_path && folder_path.is_some()
+}
+
+fn sync_workspace_path_visibility(state: &State, show_workspace_path: bool) {
+    let app_state = state.borrow();
+    for workspace in &app_state.workspaces {
+        workspace.path_label.set_visible(workspace_path_visible(
+            workspace.folder_path.as_deref(),
+            show_workspace_path,
+        ));
+    }
 }
 
 /// Abbreviate a path by replacing the home directory with ~.
@@ -3478,8 +3490,14 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
     let split_container = SplitTreeContainer::new(state, pane.clone().upcast());
     let root = split_container.widget().clone();
 
+    let show_workspace_path = state
+        .borrow()
+        .config
+        .borrow()
+        .appearance
+        .show_workspace_path;
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
-        build_sidebar_row(&seed.name, seed.folder_path.as_deref());
+        build_sidebar_row(&seed.name, seed.folder_path.as_deref(), show_workspace_path);
     let row_clone = row.clone();
     {
         let mut app_state = state.borrow_mut();
@@ -4593,8 +4611,18 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         build_workspace_root(state, &shortcuts, &id, working_dir, &workspace.layout);
     stack.add_named(&root, Some(&stack_name));
 
+    let show_workspace_path = state
+        .borrow()
+        .config
+        .borrow()
+        .appearance
+        .show_workspace_path;
     let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
-        build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
+        build_sidebar_row(
+            &workspace.name,
+            workspace.folder_path.as_deref(),
+            show_workspace_path,
+        );
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
 
@@ -4794,6 +4822,13 @@ pub(crate) fn create_pane_for_workspace(
                 if updated.appearance.ui_scale != previous.appearance.ui_scale {
                     reload_app_css(&state_for_config_changed, updated);
                 }
+                if updated.appearance.show_workspace_path != previous.appearance.show_workspace_path
+                {
+                    sync_workspace_path_visibility(
+                        &state_for_config_changed,
+                        updated.appearance.show_workspace_path,
+                    );
+                }
                 if let Err(err) = app_config::save(updated) {
                     state_for_config_changed
                         .borrow()
@@ -4803,6 +4838,14 @@ pub(crate) fn create_pane_for_workspace(
                     apply_appearance(&style_manager, system_prefers_dark, &previous.appearance);
                     if updated.appearance.ui_scale != previous.appearance.ui_scale {
                         reload_app_css(&state_for_config_changed, previous);
+                    }
+                    if updated.appearance.show_workspace_path
+                        != previous.appearance.show_workspace_path
+                    {
+                        sync_workspace_path_visibility(
+                            &state_for_config_changed,
+                            previous.appearance.show_workspace_path,
+                        );
                     }
 
                     let detail = format!("Failed to save Limux settings: {err}");
@@ -6134,8 +6177,8 @@ mod tests {
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
         validate_workspace_folder_input_with_dirs, workspace_drop_layout_path,
-        workspace_folder_path_from_input, workspace_notification_message, Direction,
-        EditableCaptureContext, NeighborScore, PaneBounds, PaneCreateDirection,
+        workspace_folder_path_from_input, workspace_notification_message, workspace_path_visible,
+        Direction, EditableCaptureContext, NeighborScore, PaneBounds, PaneCreateDirection,
         PaneCreateTargetError, PortalColorSchemePreference, SessionSaveAccess, SessionSaveRequest,
         WorkspaceSeedSource, BASE_CSS, HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS,
         WORKSPACE_RENAME_ENTRY_CSS_CLASSES,
@@ -7000,6 +7043,13 @@ mod tests {
         assert_eq!(seed.name, "Browser");
         assert_eq!(seed.cwd.as_deref(), Some("/workspace-folder"));
         assert_eq!(seed.folder_path.as_deref(), Some("/workspace-folder"));
+    }
+
+    #[test]
+    fn workspace_path_visibility_requires_path_and_enabled_setting() {
+        assert!(workspace_path_visible(Some("/workspace"), true));
+        assert!(!workspace_path_visible(Some("/workspace"), false));
+        assert!(!workspace_path_visible(None, true));
     }
 
     #[test]
