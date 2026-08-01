@@ -2125,7 +2125,7 @@ fn translated_keyval_for_keycode(
     keycode: u32,
     modifier: gtk::gdk::ModifierType,
 ) -> gtk::gdk::Key {
-    if keycode == 0 {
+    if keycode == 0 || !modifier.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
         return keyval;
     }
 
