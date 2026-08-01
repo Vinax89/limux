@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use limux_ghostty_sys::*;
@@ -60,6 +60,7 @@ const LINK_PREVIEW_CURSOR_Y_GAP: i32 = 14;
 
 /// Per-surface state, stored in a global registry keyed by surface pointer.
 struct SurfaceEntry {
+    identity: SurfaceIdentity,
     gl_area: gtk::GLArea,
     toast_overlay: gtk::Overlay,
     scrollbar: gtk::Scrollbar,
@@ -79,6 +80,7 @@ struct SurfaceEntry {
     link_popover: gtk::Popover,
     link_label: gtk::Label,
     cursor_pos: Rc<Cell<(f64, f64)>>,
+    mouse_cursor: Cell<MouseCursorState>,
 }
 
 struct ClipboardContext {
@@ -93,8 +95,122 @@ struct ClipboardWritePolicy {
     show_toast: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MouseCursorState {
+    shape: ghostty_action_mouse_shape_e,
+    visible: bool,
+}
+
+impl Default for MouseCursorState {
+    fn default() -> Self {
+        Self {
+            shape: GHOSTTY_MOUSE_SHAPE_TEXT,
+            visible: true,
+        }
+    }
+}
+
+impl MouseCursorState {
+    fn update_shape(self, shape: ghostty_action_mouse_shape_e) -> Self {
+        Self { shape, ..self }
+    }
+
+    fn update_visibility(self, visibility: ghostty_action_mouse_visibility_e) -> Self {
+        Self {
+            visible: visibility != GHOSTTY_MOUSE_HIDDEN,
+            ..self
+        }
+    }
+
+    fn gtk_cursor_name(self) -> &'static str {
+        if self.visible {
+            gtk_cursor_name_for_ghostty_shape(self.shape)
+        } else {
+            "none"
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MouseCursorUpdate {
+    Shape(ghostty_action_mouse_shape_e),
+    Visibility(ghostty_action_mouse_visibility_e),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurfaceIdentity {
+    surface_key: usize,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct SurfaceIdentityRegistry {
+    next_generation: u64,
+    active_generations: HashMap<usize, u64>,
+}
+
+impl SurfaceIdentityRegistry {
+    fn register(&mut self, surface_key: usize) -> SurfaceIdentity {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let identity = SurfaceIdentity {
+            surface_key,
+            generation: self.next_generation,
+        };
+        self.active_generations
+            .insert(surface_key, identity.generation);
+        identity
+    }
+
+    fn current(&self, surface_key: usize) -> Option<SurfaceIdentity> {
+        self.active_generations
+            .get(&surface_key)
+            .copied()
+            .map(|generation| SurfaceIdentity {
+                surface_key,
+                generation,
+            })
+    }
+
+    fn is_current(&self, identity: SurfaceIdentity) -> bool {
+        self.current(identity.surface_key) == Some(identity)
+    }
+
+    fn unregister(&mut self, identity: SurfaceIdentity) {
+        if self.is_current(identity) {
+            self.active_generations.remove(&identity.surface_key);
+        }
+    }
+}
+
 thread_local! {
     static SURFACE_MAP: RefCell<HashMap<usize, SurfaceEntry>> = RefCell::new(HashMap::new());
+}
+
+static SURFACE_IDENTITIES: OnceLock<Mutex<SurfaceIdentityRegistry>> = OnceLock::new();
+
+fn surface_identity_registry() -> &'static Mutex<SurfaceIdentityRegistry> {
+    SURFACE_IDENTITIES.get_or_init(|| Mutex::new(SurfaceIdentityRegistry::default()))
+}
+
+fn register_surface_identity(surface_key: usize) -> SurfaceIdentity {
+    surface_identity_registry()
+        .lock()
+        .expect("surface identity registry poisoned")
+        .register(surface_key)
+}
+
+fn current_surface_identity(surface_key: usize) -> Option<SurfaceIdentity> {
+    surface_identity_registry()
+        .lock()
+        .expect("surface identity registry poisoned")
+        .current(surface_key)
+}
+
+fn unregister_surface_identity(identity: SurfaceIdentity) {
+    surface_identity_registry()
+        .lock()
+        .expect("surface identity registry poisoned")
+        .unregister(identity);
 }
 
 #[derive(Clone)]
@@ -542,6 +658,84 @@ fn current_ghostty_color_scheme() -> c_int {
     CURRENT_COLOR_SCHEME.load(Ordering::Relaxed)
 }
 
+fn gtk_cursor_name_for_ghostty_shape(shape: ghostty_action_mouse_shape_e) -> &'static str {
+    match shape {
+        GHOSTTY_MOUSE_SHAPE_DEFAULT => "default",
+        GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU => "context-menu",
+        GHOSTTY_MOUSE_SHAPE_HELP => "help",
+        GHOSTTY_MOUSE_SHAPE_POINTER => "pointer",
+        GHOSTTY_MOUSE_SHAPE_PROGRESS => "progress",
+        GHOSTTY_MOUSE_SHAPE_WAIT => "wait",
+        GHOSTTY_MOUSE_SHAPE_CELL => "cell",
+        GHOSTTY_MOUSE_SHAPE_CROSSHAIR => "crosshair",
+        GHOSTTY_MOUSE_SHAPE_TEXT => "text",
+        GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT => "vertical-text",
+        GHOSTTY_MOUSE_SHAPE_ALIAS => "alias",
+        GHOSTTY_MOUSE_SHAPE_COPY => "copy",
+        GHOSTTY_MOUSE_SHAPE_MOVE => "move",
+        GHOSTTY_MOUSE_SHAPE_NO_DROP => "no-drop",
+        GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED => "not-allowed",
+        GHOSTTY_MOUSE_SHAPE_GRAB => "grab",
+        GHOSTTY_MOUSE_SHAPE_GRABBING => "grabbing",
+        GHOSTTY_MOUSE_SHAPE_ALL_SCROLL => "all-scroll",
+        GHOSTTY_MOUSE_SHAPE_COL_RESIZE => "col-resize",
+        GHOSTTY_MOUSE_SHAPE_ROW_RESIZE => "row-resize",
+        GHOSTTY_MOUSE_SHAPE_N_RESIZE => "n-resize",
+        GHOSTTY_MOUSE_SHAPE_E_RESIZE => "e-resize",
+        GHOSTTY_MOUSE_SHAPE_S_RESIZE => "s-resize",
+        GHOSTTY_MOUSE_SHAPE_W_RESIZE => "w-resize",
+        GHOSTTY_MOUSE_SHAPE_NE_RESIZE => "ne-resize",
+        GHOSTTY_MOUSE_SHAPE_NW_RESIZE => "nw-resize",
+        GHOSTTY_MOUSE_SHAPE_SE_RESIZE => "se-resize",
+        GHOSTTY_MOUSE_SHAPE_SW_RESIZE => "sw-resize",
+        GHOSTTY_MOUSE_SHAPE_EW_RESIZE => "ew-resize",
+        GHOSTTY_MOUSE_SHAPE_NS_RESIZE => "ns-resize",
+        GHOSTTY_MOUSE_SHAPE_NESW_RESIZE => "nesw-resize",
+        GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE => "nwse-resize",
+        GHOSTTY_MOUSE_SHAPE_ZOOM_IN => "zoom-in",
+        GHOSTTY_MOUSE_SHAPE_ZOOM_OUT => "zoom-out",
+        _ => "default",
+    }
+}
+
+fn set_gtk_mouse_cursor(widget: &impl IsA<gtk::Widget>, state: MouseCursorState) {
+    widget.set_cursor_from_name(Some(state.gtk_cursor_name()));
+}
+
+fn apply_mouse_cursor_update(identity: SurfaceIdentity, update: MouseCursorUpdate) {
+    SURFACE_MAP.with(|map| {
+        let map = map.borrow();
+        let Some(entry) = map.get(&identity.surface_key) else {
+            return;
+        };
+        if entry.identity != identity {
+            return;
+        }
+        let state = match update {
+            MouseCursorUpdate::Shape(shape) => entry.mouse_cursor.get().update_shape(shape),
+            MouseCursorUpdate::Visibility(visibility) => {
+                entry.mouse_cursor.get().update_visibility(visibility)
+            }
+        };
+        entry.mouse_cursor.set(state);
+        set_gtk_mouse_cursor(&entry.gl_area, state);
+    });
+}
+
+fn dispatch_mouse_cursor_update(surface_key: usize, update: MouseCursorUpdate) {
+    let Some(identity) = current_surface_identity(surface_key) else {
+        return;
+    };
+
+    if glib::MainContext::default().is_owner() {
+        apply_mouse_cursor_update(identity, update);
+    } else {
+        // Capture copied payload and surface generation. GTK access happens
+        // later, only if this pointer still identifies the same surface.
+        glib::idle_add_once(move || apply_mouse_cursor_update(identity, update));
+    }
+}
+
 pub fn sync_color_scheme(dark: bool) {
     let scheme = ghostty_color_scheme_for_dark_mode(dark);
     CURRENT_COLOR_SCHEME.store(scheme, Ordering::Relaxed);
@@ -698,6 +892,25 @@ unsafe extern "C" fn ghostty_action_cb(
                         }
                     });
                 }
+            }
+            true
+        }
+        GHOSTTY_ACTION_MOUSE_SHAPE => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let shape = unsafe { action.action.mouse_shape };
+                dispatch_mouse_cursor_update(surface_key, MouseCursorUpdate::Shape(shape));
+            }
+            true
+        }
+        GHOSTTY_ACTION_MOUSE_VISIBILITY => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let visibility = unsafe { action.action.mouse_visibility };
+                dispatch_mouse_cursor_update(
+                    surface_key,
+                    MouseCursorUpdate::Visibility(visibility),
+                );
             }
             true
         }
@@ -1143,6 +1356,7 @@ pub fn create_terminal(
     gl_area.set_auto_render(true);
     gl_area.set_focusable(true);
     gl_area.set_can_focus(true);
+    set_gtk_mouse_cursor(&gl_area, MouseCursorState::default());
     let wd = working_directory.map(|s| s.to_string());
     let saved_font_size = options.saved_font_size;
     let startup_command = options.startup_command;
@@ -1353,6 +1567,8 @@ pub fn create_terminal(
                 eprintln!("limux: failed to create ghostty surface");
                 return;
             }
+            let surface_key = surface as usize;
+            let surface_identity = register_surface_identity(surface_key);
             unsafe {
                 (*clipboard_context).surface.set(surface);
                 ghostty_surface_set_color_scheme(surface, current_ghostty_color_scheme());
@@ -1380,11 +1596,11 @@ pub fn create_terminal(
                 refresh_surface_display(surface, gl_area);
             }
 
-            let surface_key = surface as usize;
             SURFACE_MAP.with(|map| {
                 map.borrow_mut().insert(
                     surface_key,
                     SurfaceEntry {
+                        identity: surface_identity,
                         gl_area: gl.clone(),
                         toast_overlay: overlay_for_map.clone(),
                         scrollbar: scrollbar_for_map.clone(),
@@ -1437,6 +1653,7 @@ pub fn create_terminal(
                         link_popover: link_popover_for_map.clone(),
                         link_label: link_label_for_map.clone(),
                         cursor_pos: cursor_pos_for_map.clone(),
+                        mouse_cursor: Cell::new(MouseCursorState::default()),
                     },
                 );
             });
@@ -1803,6 +2020,7 @@ pub fn create_terminal(
                 let surface_key = surface as usize;
                 SURFACE_MAP.with(|map| {
                     if let Some(entry) = map.borrow_mut().remove(&surface_key) {
+                        unregister_surface_identity(entry.identity);
                         unsafe {
                             drop(Box::from_raw(entry.clipboard_context));
                         }
@@ -2380,6 +2598,84 @@ mod tests {
             ghostty_color_scheme_for_dark_mode(false),
             GHOSTTY_COLOR_SCHEME_LIGHT
         );
+    }
+
+    #[test]
+    fn maps_ghostty_mouse_shapes_to_gtk_cursor_names() {
+        let cases = [
+            (GHOSTTY_MOUSE_SHAPE_DEFAULT, "default"),
+            (GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU, "context-menu"),
+            (GHOSTTY_MOUSE_SHAPE_HELP, "help"),
+            (GHOSTTY_MOUSE_SHAPE_POINTER, "pointer"),
+            (GHOSTTY_MOUSE_SHAPE_PROGRESS, "progress"),
+            (GHOSTTY_MOUSE_SHAPE_WAIT, "wait"),
+            (GHOSTTY_MOUSE_SHAPE_CELL, "cell"),
+            (GHOSTTY_MOUSE_SHAPE_CROSSHAIR, "crosshair"),
+            (GHOSTTY_MOUSE_SHAPE_TEXT, "text"),
+            (GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT, "vertical-text"),
+            (GHOSTTY_MOUSE_SHAPE_ALIAS, "alias"),
+            (GHOSTTY_MOUSE_SHAPE_COPY, "copy"),
+            (GHOSTTY_MOUSE_SHAPE_MOVE, "move"),
+            (GHOSTTY_MOUSE_SHAPE_NO_DROP, "no-drop"),
+            (GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED, "not-allowed"),
+            (GHOSTTY_MOUSE_SHAPE_GRAB, "grab"),
+            (GHOSTTY_MOUSE_SHAPE_GRABBING, "grabbing"),
+            (GHOSTTY_MOUSE_SHAPE_ALL_SCROLL, "all-scroll"),
+            (GHOSTTY_MOUSE_SHAPE_COL_RESIZE, "col-resize"),
+            (GHOSTTY_MOUSE_SHAPE_ROW_RESIZE, "row-resize"),
+            (GHOSTTY_MOUSE_SHAPE_N_RESIZE, "n-resize"),
+            (GHOSTTY_MOUSE_SHAPE_E_RESIZE, "e-resize"),
+            (GHOSTTY_MOUSE_SHAPE_S_RESIZE, "s-resize"),
+            (GHOSTTY_MOUSE_SHAPE_W_RESIZE, "w-resize"),
+            (GHOSTTY_MOUSE_SHAPE_NE_RESIZE, "ne-resize"),
+            (GHOSTTY_MOUSE_SHAPE_NW_RESIZE, "nw-resize"),
+            (GHOSTTY_MOUSE_SHAPE_SE_RESIZE, "se-resize"),
+            (GHOSTTY_MOUSE_SHAPE_SW_RESIZE, "sw-resize"),
+            (GHOSTTY_MOUSE_SHAPE_EW_RESIZE, "ew-resize"),
+            (GHOSTTY_MOUSE_SHAPE_NS_RESIZE, "ns-resize"),
+            (GHOSTTY_MOUSE_SHAPE_NESW_RESIZE, "nesw-resize"),
+            (GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE, "nwse-resize"),
+            (GHOSTTY_MOUSE_SHAPE_ZOOM_IN, "zoom-in"),
+            (GHOSTTY_MOUSE_SHAPE_ZOOM_OUT, "zoom-out"),
+        ];
+
+        for (shape, expected) in cases {
+            assert_eq!(gtk_cursor_name_for_ghostty_shape(shape), expected);
+        }
+        assert_eq!(gtk_cursor_name_for_ghostty_shape(c_int::MAX), "default");
+    }
+
+    #[test]
+    fn mouse_visibility_restores_latest_shape_and_treats_unknown_as_visible() {
+        let state = MouseCursorState::default()
+            .update_shape(GHOSTTY_MOUSE_SHAPE_POINTER)
+            .update_visibility(GHOSTTY_MOUSE_HIDDEN);
+        assert_eq!(state.gtk_cursor_name(), "none");
+
+        let state = state
+            .update_shape(GHOSTTY_MOUSE_SHAPE_WAIT)
+            .update_visibility(GHOSTTY_MOUSE_VISIBLE);
+        assert_eq!(state.gtk_cursor_name(), "wait");
+
+        let state = state.update_visibility(c_int::MAX);
+        assert!(state.visible);
+        assert_eq!(state.gtk_cursor_name(), "wait");
+    }
+
+    #[test]
+    fn surface_generation_rejects_queued_cursor_update_after_address_reuse() {
+        let mut registry = SurfaceIdentityRegistry::default();
+        let surface_key = 0x1234;
+        let original = registry.register(surface_key);
+        let queued_update = registry.current(surface_key).unwrap();
+
+        registry.unregister(original);
+        let replacement = registry.register(surface_key);
+
+        assert_eq!(queued_update.surface_key, replacement.surface_key);
+        assert_ne!(queued_update.generation, replacement.generation);
+        assert!(!registry.is_current(queued_update));
+        assert!(registry.is_current(replacement));
     }
 
     #[test]
