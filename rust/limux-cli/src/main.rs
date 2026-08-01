@@ -198,9 +198,49 @@ fn parse_global_args() -> Result<GlobalOptions> {
 }
 
 fn print_help() {
-    println!(
-        "limux CLI\n\nUsage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]\n       limux --version\n       limux\n\nRunning `limux` with no arguments launches the GTK app.\n\nCommon commands:\n  identify [--workspace <id|ref>] [--surface <id|ref>]\n  list-panels [--workspace <id|ref>]\n  list-panes [--workspace <id|ref>]\n  list-workspaces\n  surface-health [--workspace <id|ref>]\n  send [--workspace <id|ref>] [--surface <id|ref>] <text>\n  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>\n  new-workspace [--cwd <path>] [--command <text>]\n  select-workspace --workspace <id|ref>\n  close-workspace --workspace <id|ref>\n  sidebar-state --workspace <id|ref>\n  new-surface [--workspace <id|ref>]\n  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]\n      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.\n  rename-workspace [--workspace <id|ref>] <title>\n  rename-window [--workspace <id|ref>] <title>\n  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>\n  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]\n  capture-pane (alias of read-screen)\n  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]\n  browser [--surface <id|ref>|<surface>] <subcommand> ...\n\nAgent integrations:\n  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] <title>\n  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>\n  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]\n  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]\n      Splits the active workspace into one pane per agent (caller's pane stays\n      as the orchestrator on the left, peers stack down the right), launches\n      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>\n      XML protocol so peers can talk via\n      `limux send --surface <peer-surface-id> <envelope>`.\n"
-    );
+    const HELP: &str = r#"limux CLI
+
+Usage: limux [--socket <path>] [--json] [--id-format refs|both|uuids] <command> [args...]
+       limux --version
+       limux
+
+Running `limux` with no arguments launches the GTK app.
+
+Common commands:
+  identify [--workspace <id|ref>] [--surface <id|ref>]
+  list-panels [--workspace <id|ref>]
+  list-panes [--workspace <id|ref>]
+  list-workspaces
+  surface-health [--workspace <id|ref>]
+  send [--workspace <id|ref>] [--surface <id|ref>] <text>
+  send-key [--workspace <id|ref>] [--surface <id|ref>] <key>
+  new-workspace [--cwd <path>] [--command <text>]
+  select-workspace --workspace <id|ref>
+  close-workspace --workspace <id|ref>
+  sidebar-state --workspace <id|ref>
+  new-surface [--workspace <id|ref>]
+  new-pane [--workspace <id|ref>] [--pane <id|ref>] [--surface <id|ref>] [--direction <left|right|up|down>] [--type <terminal|browser>] [--command <text>] [--url <url>]
+      Live GTK self-spawn currently supports terminal panes only; browser panes remain deferred.
+  rename-workspace [--workspace <id|ref>] <title>
+  rename-window [--workspace <id|ref>] <title>
+  rename-tab [--workspace <id|ref>] [--tab <id|ref>] <title>
+  read-screen [--workspace <id|ref>] [--surface <id|ref>] [--scrollback] [--lines <n>]
+  capture-pane (alias of read-screen)
+  tab-action --action <name> [--workspace <id|ref>] [--tab <id|ref>] [--title <text>] [--url <url>]
+  browser [--surface <id|ref>|<surface>] <subcommand> ...
+
+Agent integrations:
+  notify [--workspace <id|ref>] [--surface <id|ref>] [--subtitle <text>] [--body <text>] <title>
+  hooks setup [agent] | hooks uninstall [agent] | hooks <agent> <event>
+  claude-hook | opencode-hook | gemini-hook --event <name> [--subtitle <text>] [--body <text>] [--title <text>]
+  agent-team [--agents codex,claude[,opencode,gemini]] [--cwd <path>] [--no-launch] [--dry-run]
+      Splits the active workspace into one pane per agent (caller's pane stays
+      as the orchestrator on the left, peers stack down the right), launches
+      each CLI in its pane, and writes AGENTS.md describing the <agent-msg>
+      XML protocol so peers can talk via
+      `limux send --surface <peer-surface-id> <envelope>`."#;
+
+    println!("{HELP}\n");
 }
 
 fn should_launch_host(opts: &GlobalOptions) -> bool {
