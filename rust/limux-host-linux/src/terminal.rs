@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use limux_ghostty_sys::*;
@@ -60,6 +60,7 @@ const LINK_PREVIEW_CURSOR_Y_GAP: i32 = 14;
 
 /// Per-surface state, stored in a global registry keyed by surface pointer.
 struct SurfaceEntry {
+    identity: SurfaceIdentity,
     gl_area: gtk::GLArea,
     toast_overlay: gtk::Overlay,
     scrollbar: gtk::Scrollbar,
@@ -136,8 +137,80 @@ enum MouseCursorUpdate {
     Visibility(ghostty_action_mouse_visibility_e),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurfaceIdentity {
+    surface_key: usize,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct SurfaceIdentityRegistry {
+    next_generation: u64,
+    active_generations: HashMap<usize, u64>,
+}
+
+impl SurfaceIdentityRegistry {
+    fn register(&mut self, surface_key: usize) -> SurfaceIdentity {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        let identity = SurfaceIdentity {
+            surface_key,
+            generation: self.next_generation,
+        };
+        self.active_generations
+            .insert(surface_key, identity.generation);
+        identity
+    }
+
+    fn current(&self, surface_key: usize) -> Option<SurfaceIdentity> {
+        self.active_generations
+            .get(&surface_key)
+            .copied()
+            .map(|generation| SurfaceIdentity {
+                surface_key,
+                generation,
+            })
+    }
+
+    fn is_current(&self, identity: SurfaceIdentity) -> bool {
+        self.current(identity.surface_key) == Some(identity)
+    }
+
+    fn unregister(&mut self, identity: SurfaceIdentity) {
+        if self.is_current(identity) {
+            self.active_generations.remove(&identity.surface_key);
+        }
+    }
+}
+
 thread_local! {
     static SURFACE_MAP: RefCell<HashMap<usize, SurfaceEntry>> = RefCell::new(HashMap::new());
+}
+
+static SURFACE_IDENTITIES: OnceLock<Mutex<SurfaceIdentityRegistry>> = OnceLock::new();
+
+fn surface_identity_registry() -> &'static Mutex<SurfaceIdentityRegistry> {
+    SURFACE_IDENTITIES.get_or_init(|| Mutex::new(SurfaceIdentityRegistry::default()))
+}
+
+fn register_surface_identity(surface_key: usize) -> SurfaceIdentity {
+    surface_identity_registry()
+        .lock()
+        .expect("surface identity registry poisoned")
+        .register(surface_key)
+}
+
+fn current_surface_identity(surface_key: usize) -> Option<SurfaceIdentity> {
+    surface_identity_registry()
+        .lock()
+        .expect("surface identity registry poisoned")
+        .current(surface_key)
+}
+
+fn unregister_surface_identity(identity: SurfaceIdentity) {
+    surface_identity_registry()
+        .lock()
+        .expect("surface identity registry poisoned")
+        .unregister(identity);
 }
 
 #[derive(Clone)]
@@ -629,12 +702,15 @@ fn set_gtk_mouse_cursor(widget: &impl IsA<gtk::Widget>, state: MouseCursorState)
     widget.set_cursor_from_name(Some(state.gtk_cursor_name()));
 }
 
-fn apply_mouse_cursor_update(surface_key: usize, update: MouseCursorUpdate) {
+fn apply_mouse_cursor_update(identity: SurfaceIdentity, update: MouseCursorUpdate) {
     SURFACE_MAP.with(|map| {
         let map = map.borrow();
-        let Some(entry) = map.get(&surface_key) else {
+        let Some(entry) = map.get(&identity.surface_key) else {
             return;
         };
+        if entry.identity != identity {
+            return;
+        }
         let state = match update {
             MouseCursorUpdate::Shape(shape) => entry.mouse_cursor.get().update_shape(shape),
             MouseCursorUpdate::Visibility(visibility) => {
@@ -647,12 +723,16 @@ fn apply_mouse_cursor_update(surface_key: usize, update: MouseCursorUpdate) {
 }
 
 fn dispatch_mouse_cursor_update(surface_key: usize, update: MouseCursorUpdate) {
+    let Some(identity) = current_surface_identity(surface_key) else {
+        return;
+    };
+
     if glib::MainContext::default().is_owner() {
-        apply_mouse_cursor_update(surface_key, update);
+        apply_mouse_cursor_update(identity, update);
     } else {
-        // Capture only copied payload data. GTK access and stale-surface lookup
-        // happen later on the main context.
-        glib::idle_add_once(move || apply_mouse_cursor_update(surface_key, update));
+        // Capture copied payload and surface generation. GTK access happens
+        // later, only if this pointer still identifies the same surface.
+        glib::idle_add_once(move || apply_mouse_cursor_update(identity, update));
     }
 }
 
@@ -1487,6 +1567,8 @@ pub fn create_terminal(
                 eprintln!("limux: failed to create ghostty surface");
                 return;
             }
+            let surface_key = surface as usize;
+            let surface_identity = register_surface_identity(surface_key);
             unsafe {
                 (*clipboard_context).surface.set(surface);
                 ghostty_surface_set_color_scheme(surface, current_ghostty_color_scheme());
@@ -1514,11 +1596,11 @@ pub fn create_terminal(
                 refresh_surface_display(surface, gl_area);
             }
 
-            let surface_key = surface as usize;
             SURFACE_MAP.with(|map| {
                 map.borrow_mut().insert(
                     surface_key,
                     SurfaceEntry {
+                        identity: surface_identity,
                         gl_area: gl.clone(),
                         toast_overlay: overlay_for_map.clone(),
                         scrollbar: scrollbar_for_map.clone(),
@@ -1938,6 +2020,7 @@ pub fn create_terminal(
                 let surface_key = surface as usize;
                 SURFACE_MAP.with(|map| {
                     if let Some(entry) = map.borrow_mut().remove(&surface_key) {
+                        unregister_surface_identity(entry.identity);
                         unsafe {
                             drop(Box::from_raw(entry.clipboard_context));
                         }
@@ -2577,6 +2660,22 @@ mod tests {
         let state = state.update_visibility(c_int::MAX);
         assert!(state.visible);
         assert_eq!(state.gtk_cursor_name(), "wait");
+    }
+
+    #[test]
+    fn surface_generation_rejects_queued_cursor_update_after_address_reuse() {
+        let mut registry = SurfaceIdentityRegistry::default();
+        let surface_key = 0x1234;
+        let original = registry.register(surface_key);
+        let queued_update = registry.current(surface_key).unwrap();
+
+        registry.unregister(original);
+        let replacement = registry.register(surface_key);
+
+        assert_eq!(queued_update.surface_key, replacement.surface_key);
+        assert_ne!(queued_update.generation, replacement.generation);
+        assert!(!registry.is_current(queued_update));
+        assert!(registry.is_current(replacement));
     }
 
     #[test]
