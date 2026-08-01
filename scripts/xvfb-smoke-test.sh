@@ -53,10 +53,9 @@ LIMUX_CLI="$ROOT_DIR/$BIN_DIR/limux-cli"
 [ -x "$LIMUX_HOST" ] || { echo "FAIL: host binary missing at $LIMUX_HOST"; exit 2; }
 [ -x "$LIMUX_CLI" ]  || { echo "FAIL: cli binary missing at $LIMUX_CLI"; exit 2; }
 
-# The release host needs libghostty.so on the runtime path; debug finds
-# it via rpath.
+# Use the freshly built Ghostty shared library in every build profile.
 LIBGHOSTTY_DIR="$ROOT_DIR/ghostty/zig-out/lib"
-if [ "$PROFILE" = "release" ] && [ -d "$LIBGHOSTTY_DIR" ]; then
+if [ -d "$LIBGHOSTTY_DIR" ]; then
   export LD_LIBRARY_PATH="$LIBGHOSTTY_DIR:${LD_LIBRARY_PATH:-}"
 fi
 
