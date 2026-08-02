@@ -2091,6 +2091,11 @@ fn url_at_position(
     restore_mods: c_int,
 ) -> Option<String> {
     let surface = surface?;
+    // Mouse-position callbacks become terminal input while a TUI has mouse
+    // reporting enabled, so probing there would alter terminal state.
+    if unsafe { ghostty_surface_mouse_captured(surface) } {
+        return None;
+    }
     let clipboard_context = SURFACE_MAP.with(|map| {
         map.borrow()
             .get(&(surface as usize))
@@ -2099,23 +2104,16 @@ fn url_at_position(
     let context = unsafe { clipboard_context.as_ref() }?;
 
     context.url_probe_active.set(true);
-    let mut url = None;
 
     // Let Ghostty resolve OSC 8 targets and wrapped URLs. Leave and re-enter
-    // because embedded surfaces deduplicate same-position moves; retry with
-    // Shift to escape terminal mouse capture when a TUI enables reporting.
-    for probe_mods in [GHOSTTY_MODS_CTRL, GHOSTTY_MODS_CTRL | GHOSTTY_MODS_SHIFT] {
-        *context.url_probe.borrow_mut() = None;
-        unsafe {
-            ghostty_surface_mouse_pos(surface, -1.0, -1.0, probe_mods);
-            ghostty_surface_mouse_pos(surface, x, y, probe_mods);
-        }
-        surface_action(Some(surface), "copy_url_to_clipboard");
-        url = context.url_probe.borrow_mut().take();
-        if url.is_some() {
-            break;
-        }
+    // because embedded surfaces deduplicate same-position moves.
+    *context.url_probe.borrow_mut() = None;
+    unsafe {
+        ghostty_surface_mouse_pos(surface, -1.0, -1.0, GHOSTTY_MODS_CTRL);
+        ghostty_surface_mouse_pos(surface, x, y, GHOSTTY_MODS_CTRL);
     }
+    surface_action(Some(surface), "copy_url_to_clipboard");
+    let url = context.url_probe.borrow_mut().take();
     context.url_probe_active.set(false);
 
     unsafe {

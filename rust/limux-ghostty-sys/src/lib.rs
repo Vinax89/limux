@@ -516,6 +516,7 @@ extern "C" {
         button: c_int,
         mods: c_int,
     ) -> bool;
+    pub fn ghostty_surface_mouse_captured(surface: ghostty_surface_t) -> bool;
     pub fn ghostty_surface_mouse_pos(surface: ghostty_surface_t, x: f64, y: f64, mods: c_int);
     pub fn ghostty_surface_mouse_scroll(surface: ghostty_surface_t, x: f64, y: f64, mods: c_int);
     pub fn ghostty_surface_ime_point(
