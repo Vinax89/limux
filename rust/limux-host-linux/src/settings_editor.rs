@@ -285,6 +285,25 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     workspace_path_row.set_activatable_widget(Some(&workspace_path_switch));
     group.add(&workspace_path_row);
 
+    let keep_workspace_open_row = adw::ActionRow::builder()
+        .title("Keep workspace open")
+        .subtitle("Keep the workspace available after its final terminal exits")
+        .build();
+    keep_workspace_open_row.set_title_lines(1);
+    keep_workspace_open_row.set_subtitle_lines(2);
+    let keep_workspace_open_switch = gtk::Switch::new();
+    keep_workspace_open_switch.set_active(
+        input
+            .config
+            .borrow()
+            .workspace
+            .keep_open_after_last_terminal_closes,
+    );
+    keep_workspace_open_switch.set_valign(gtk::Align::Center);
+    keep_workspace_open_row.add_suffix(&keep_workspace_open_switch);
+    keep_workspace_open_row.set_activatable_widget(Some(&keep_workspace_open_switch));
+    group.add(&keep_workspace_open_row);
+
     let auto_copy_row = adw::ActionRow::builder()
         .title("Copy selection automatically")
         .subtitle("Copy selected terminal text to the regular clipboard")
@@ -389,6 +408,16 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
                 switch.set_active(effective);
                 syncing.set(false);
             }
+        });
+    }
+    {
+        let config = input.config.clone();
+        let on_changed = input.on_config_changed.clone();
+        keep_workspace_open_switch.connect_active_notify(move |switch| {
+            let keep_open = switch.is_active();
+            apply_config_change(&config, &*on_changed, move |c| {
+                c.workspace.keep_open_after_last_terminal_closes = keep_open;
+            });
         });
     }
     {

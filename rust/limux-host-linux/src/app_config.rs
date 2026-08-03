@@ -46,11 +46,18 @@ pub struct AppConfig {
     #[serde(skip)]
     pub appearance: AppearanceConfig,
     #[serde(skip)]
+    pub workspace: WorkspaceConfig,
+    #[serde(skip)]
     pub notifications: NotificationConfig,
     #[serde(skip)]
     pub clipboard: ClipboardConfig,
     #[serde(skip)]
     pub font_size: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceConfig {
+    pub keep_open_after_last_terminal_closes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -306,6 +313,12 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
+    let workspace = root.get("workspace").and_then(Value::as_object);
+    let keep_open_after_last_terminal_closes = workspace
+        .and_then(|workspace| workspace.get("keep_open_after_last_terminal_closes"))
+        .and_then(Value::as_bool)
+        .unwrap_or_default();
+
     let notifications = root.get("notifications").and_then(Value::as_object);
     let notification_defaults = NotificationConfig::default();
     let notifications_enabled = notifications
@@ -340,6 +353,9 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
             ghostty_color_scheme,
             ui_scale,
             show_workspace_path,
+        },
+        workspace: WorkspaceConfig {
+            keep_open_after_last_terminal_closes,
         },
         notifications: NotificationConfig {
             enabled: notifications_enabled,
@@ -387,6 +403,14 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
     root.insert(
         "focus".to_string(),
         json!({ "hover_terminal_focus": config.focus.hover_terminal_focus }),
+    );
+    root.insert(
+        "workspace".to_string(),
+        json!({
+            "keep_open_after_last_terminal_closes": config
+                .workspace
+                .keep_open_after_last_terminal_closes,
+        }),
     );
     root.insert(
         "notifications".to_string(),
@@ -516,6 +540,9 @@ fn ensure_default_config_file(path: &Path) -> std::io::Result<()> {
         "focus": {
             "hover_terminal_focus": false
         },
+        "workspace": {
+            "keep_open_after_last_terminal_closes": false
+        },
         "notifications": {
             "enabled": true,
             "sound": "default"
@@ -598,6 +625,10 @@ mod tests {
         assert_eq!(
             parsed["appearance"]["show_workspace_path"],
             Value::Bool(true)
+        );
+        assert_eq!(
+            parsed["workspace"]["keep_open_after_last_terminal_closes"],
+            Value::Bool(false)
         );
         assert_eq!(parsed["notifications"]["enabled"], Value::Bool(true));
         assert_eq!(
@@ -770,6 +801,28 @@ mod tests {
     }
 
     #[test]
+    fn load_from_path_reads_workspace_lifecycle_preference() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+        fs::write(
+            &path,
+            r#"{
+  "workspace": {
+    "keep_open_after_last_terminal_closes": true
+  }
+}
+"#,
+        )
+        .expect("write config");
+
+        let loaded = load_from_path(&path);
+
+        assert!(loaded.warnings.is_empty());
+        assert!(loaded.config.workspace.keep_open_after_last_terminal_closes);
+    }
+
+    #[test]
     fn save_writes_gtk_and_ghostty_color_schemes() {
         let dir = TempDir::new().expect("temp dir");
         let path = settings_path_in(dir.path());
@@ -824,6 +877,24 @@ mod tests {
         assert_eq!(
             parsed["appearance"]["show_workspace_path"],
             Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn save_to_path_writes_workspace_lifecycle_preference() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = settings_path_in(dir.path());
+        fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
+
+        let mut config = AppConfig::default();
+        config.workspace.keep_open_after_last_terminal_closes = true;
+        save_to_path(&path, &config).expect("save workspace lifecycle preference");
+
+        let raw = fs::read_to_string(&path).expect("read config");
+        let parsed: Value = serde_json::from_str(&raw).expect("parse config");
+        assert_eq!(
+            parsed["workspace"]["keep_open_after_last_terminal_closes"],
+            Value::Bool(true)
         );
     }
 
