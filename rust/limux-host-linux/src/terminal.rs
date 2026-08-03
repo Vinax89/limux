@@ -86,6 +86,8 @@ struct SurfaceEntry {
 struct ClipboardContext {
     surface: Cell<ghostty_surface_t>,
     copy_selection_to_clipboard: Rc<dyn Fn() -> bool>,
+    url_probe: RefCell<Option<String>>,
+    url_probe_active: Cell<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1220,6 +1222,13 @@ unsafe extern "C" fn ghostty_write_clipboard_cb(
         .unwrap_or("")
         .to_string();
 
+    if let Some(context) = unsafe { clipboard_context_from_userdata(userdata) } {
+        if context.url_probe_active.get() {
+            *context.url_probe.borrow_mut() = Some(text);
+            return;
+        }
+    }
+
     let display = match gtk::gdk::Display::default() {
         Some(d) => d,
         None => return,
@@ -1507,6 +1516,8 @@ pub fn create_terminal(
             let clipboard_context = Box::into_raw(Box::new(ClipboardContext {
                 surface: Cell::new(ptr::null_mut()),
                 copy_selection_to_clipboard: copy_selection_to_clipboard.clone(),
+                url_probe: RefCell::new(None),
+                url_probe_active: Cell::new(false),
             }));
             config.platform_tag = GHOSTTY_PLATFORM_LINUX;
             config.platform = ghostty_platform_u {
@@ -1867,7 +1878,8 @@ pub fn create_terminal(
         right_click.set_button(3);
         right_click.connect_pressed(move |gesture, _n, x, y| {
             let surface = *sc.borrow();
-            show_terminal_context_menu(&gl, &overlay, surface, &callbacks, x, y);
+            let mods = translate_mouse_mods(gesture.current_event_state());
+            show_terminal_context_menu(&gl, &overlay, surface, &callbacks, x, y, mods);
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         gl_area.add_controller(right_click);
@@ -2072,6 +2084,51 @@ fn surface_action(surface: Option<ghostty_surface_t>, action: &str) {
     }
 }
 
+fn url_at_position(
+    surface: Option<ghostty_surface_t>,
+    x: f64,
+    y: f64,
+    restore_mods: c_int,
+) -> Option<String> {
+    let surface = surface?;
+    // Mouse-position callbacks become terminal input while a TUI has mouse
+    // reporting enabled, so probing there would alter terminal state.
+    if unsafe { ghostty_surface_mouse_captured(surface) } {
+        return None;
+    }
+    let clipboard_context = SURFACE_MAP.with(|map| {
+        map.borrow()
+            .get(&(surface as usize))
+            .map(|entry| entry.clipboard_context)
+    })?;
+    let context = unsafe { clipboard_context.as_ref() }?;
+
+    context.url_probe_active.set(true);
+
+    // Let Ghostty resolve OSC 8 targets and wrapped URLs. Leave and re-enter
+    // because embedded surfaces deduplicate same-position moves.
+    *context.url_probe.borrow_mut() = None;
+    unsafe {
+        ghostty_surface_mouse_pos(surface, -1.0, -1.0, GHOSTTY_MODS_CTRL);
+        ghostty_surface_mouse_pos(surface, x, y, GHOSTTY_MODS_CTRL);
+    }
+    surface_action(Some(surface), "copy_url_to_clipboard");
+    let url = context.url_probe.borrow_mut().take();
+    context.url_probe_active.set(false);
+
+    unsafe {
+        ghostty_surface_mouse_pos(surface, -1.0, -1.0, restore_mods);
+        ghostty_surface_mouse_pos(surface, x, y, restore_mods);
+    }
+    SURFACE_MAP.with(|map| {
+        if let Some(entry) = map.borrow().get(&(surface as usize)) {
+            entry.link_popover.popdown();
+        }
+    });
+
+    url
+}
+
 fn copy_text_to_clipboards(text: &str) {
     if let Some(display) = gtk::gdk::Display::default() {
         display.clipboard().set_text(text);
@@ -2113,15 +2170,20 @@ fn show_terminal_context_menu(
     callbacks: &Rc<RefCell<TerminalCallbacks>>,
     x: f64,
     y: f64,
+    mods: c_int,
 ) {
     let menu_box = build_popover_inner_box();
+    let url = url_at_position(surface, x, y, mods);
 
     let has_selection = surface
         .map(|s| unsafe { ghostty_surface_has_selection(s) })
         .unwrap_or(false);
 
-    let items: Vec<(&str, bool)> = vec![
-        ("Copy", has_selection),
+    let mut items: Vec<(&str, bool)> = vec![("Copy", has_selection)];
+    if url.is_some() {
+        items.push(("Copy URL", true));
+    }
+    items.extend([
         ("Paste", true),
         ("---", false),
         ("IDs", true),
@@ -2132,7 +2194,7 @@ fn show_terminal_context_menu(
         ("Keybinds", true),
         ("---", false),
         ("Clear", true),
-    ];
+    ]);
 
     let identity = (callbacks.borrow().identity)();
     let ids_popover = gtk::Popover::new();
@@ -2200,6 +2262,8 @@ fn show_terminal_context_menu(
             let pop = popover.clone();
             let cb = callbacks.clone();
             let gl_area = gl_area.clone();
+            let url = url.clone();
+            let overlay = overlay.clone();
 
             btn.connect_clicked(move |_| {
                 if label == "IDs >" {
@@ -2208,6 +2272,12 @@ fn show_terminal_context_menu(
                 pop.popdown();
                 match label.as_str() {
                     "Copy" => surface_action(surface, "copy_to_clipboard"),
+                    "Copy URL" => {
+                        if let Some(url) = url.as_deref() {
+                            copy_text_to_clipboards(url);
+                            show_clipboard_toast(&overlay);
+                        }
+                    }
                     "Paste" => surface_action(surface, "paste_from_clipboard"),
                     "Browser" => {
                         let callbacks = cb.borrow();
