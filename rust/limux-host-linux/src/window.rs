@@ -4779,7 +4779,14 @@ pub(crate) fn create_pane_for_workspace(
             });
         }),
         on_empty: Box::new(move |pane_widget, reason| {
-            let persist = matches!(reason, pane::PaneEmptyReason::ClosedLastTab);
+            if should_keep_workspace_open_for_empty_pane(&state_for_empty, &ws_id_empty, reason) {
+                request_session_save(&state_for_empty);
+                return;
+            }
+            let persist = matches!(
+                reason,
+                pane::PaneEmptyReason::ClosedLastTerminal | pane::PaneEmptyReason::ClosedLastTab
+            );
             remove_pane_internal(&state_for_empty, &ws_id_empty, pane_widget, persist);
         }),
         on_state_changed: Box::new({
@@ -5230,6 +5237,34 @@ fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
     remove_pane_internal(state, ws_id, pane_widget, true);
 }
 
+fn should_keep_workspace_open_for_empty_pane(
+    state: &State,
+    ws_id: &str,
+    reason: pane::PaneEmptyReason,
+) -> bool {
+    let s = state.borrow();
+    let enabled = s
+        .config
+        .borrow()
+        .workspace
+        .keep_open_after_last_terminal_closes;
+    let is_only_pane = s
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == ws_id)
+        .is_some_and(|workspace| workspace.split_container.is_single_pane());
+
+    keep_workspace_open_after_empty_pane(enabled, reason, is_only_pane)
+}
+
+fn keep_workspace_open_after_empty_pane(
+    enabled: bool,
+    reason: pane::PaneEmptyReason,
+    is_only_pane: bool,
+) -> bool {
+    enabled && reason == pane::PaneEmptyReason::ClosedLastTerminal && is_only_pane
+}
+
 fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, persist: bool) {
     let container = {
         let s = state.borrow();
@@ -5543,9 +5578,15 @@ fn close_focused_tab(state: &State) {
         return;
     };
 
+    let config = state.borrow().config.clone();
+    let keep_workspace_open = config
+        .borrow()
+        .workspace
+        .keep_open_after_last_terminal_closes;
     if let Some(parent) = pane_widget.parent() {
         if parent.downcast_ref::<gtk::Stack>().is_some()
             && pane::tab_count_in_pane(&pane_widget) <= 1
+            && !keep_workspace_open
         {
             return;
         }
@@ -6171,8 +6212,9 @@ mod tests {
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, favorites_prefix_len, find_leaf_pane, font_size_after_delta,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
-        next_active_workspace_index, pane_create_split_placement, queue_session_save_request,
-        resolve_pane_create_source_id, resolved_system_prefers_dark, sanitize_background_opacity,
+        keep_workspace_open_after_empty_pane, next_active_workspace_index,
+        pane_create_split_placement, queue_session_save_request, resolve_pane_create_source_id,
+        resolved_system_prefers_dark, sanitize_background_opacity,
         shortcut_allowed_while_browser_find_active, shortcut_blocked_by_editable,
         shortcut_command_from_key_event, shortcut_dispatch_propagation,
         should_emit_desktop_notification, tab_drag_workspace_seed, use_opaque_window_background,
@@ -6211,6 +6253,35 @@ mod tests {
     fn favorites_prefix_len_counts_only_leading_favorites() {
         let flags = [true, true, false, true, false];
         assert_eq!(favorites_prefix_len(&flags), 2);
+    }
+
+    #[test]
+    fn workspace_lifecycle_preference_only_preserves_a_single_closed_pane() {
+        assert!(keep_workspace_open_after_empty_pane(
+            true,
+            crate::pane::PaneEmptyReason::ClosedLastTerminal,
+            true,
+        ));
+        assert!(!keep_workspace_open_after_empty_pane(
+            false,
+            crate::pane::PaneEmptyReason::ClosedLastTerminal,
+            true,
+        ));
+        assert!(!keep_workspace_open_after_empty_pane(
+            true,
+            crate::pane::PaneEmptyReason::ClosedLastTerminal,
+            false,
+        ));
+        assert!(!keep_workspace_open_after_empty_pane(
+            true,
+            crate::pane::PaneEmptyReason::ClosedLastTab,
+            true,
+        ));
+        assert!(!keep_workspace_open_after_empty_pane(
+            true,
+            crate::pane::PaneEmptyReason::MovedLastTabOut,
+            true,
+        ));
     }
 
     #[test]

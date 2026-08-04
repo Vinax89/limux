@@ -105,6 +105,7 @@ enum ContentDropZone {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneEmptyReason {
+    ClosedLastTerminal,
     ClosedLastTab,
     MovedLastTabOut,
 }
@@ -3235,6 +3236,7 @@ fn remove_tab(
     };
     let entry = ts.tabs.remove(idx);
     let removed_was_unread = entry.unread;
+    let closed_terminal = matches!(&entry.kind, TabKind::Terminal { .. });
 
     entry.prepare_for_removal();
     tab_strip.remove(&entry.tab_button);
@@ -3245,6 +3247,11 @@ fn remove_tab(
         if removed_was_unread {
             (callbacks.on_unread_changed)();
         }
+        let empty_reason = if empty_reason == PaneEmptyReason::ClosedLastTab && closed_terminal {
+            PaneEmptyReason::ClosedLastTerminal
+        } else {
+            empty_reason
+        };
         (callbacks.on_empty)(&pane_outer.clone().upcast(), empty_reason);
         return;
     }
