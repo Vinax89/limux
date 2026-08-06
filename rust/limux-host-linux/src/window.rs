@@ -1650,27 +1650,23 @@ pub fn build_window(app: &adw::Application) {
     register_window_actions(&window, &state);
     install_key_capture(&window, &state);
 
-    // Any click anywhere in the window commits an active sidebar rename,
-    // UNLESS the click is inside the rename Entry itself.
+    // Any click anywhere in the window commits an active inline rename,
+    // unless the click is inside the rename entry itself.
     {
         let sl = sidebar_list.clone();
         let win = window.clone();
         let click_anywhere = gtk::GestureClick::new();
         click_anywhere.set_propagation_phase(gtk::PropagationPhase::Capture);
         click_anywhere.connect_pressed(move |_, _, x, y| {
-            if let Some(entry) = find_active_rename_entry(&sl) {
-                // Translate click coords from window to the entry's coordinate space
-                if let Some((ex, ey)) = win.translate_coordinates(&entry, x, y) {
-                    let alloc = entry.allocation();
-                    if ex >= 0.0
-                        && ey >= 0.0
-                        && ex <= alloc.width() as f64
-                        && ey <= alloc.height() as f64
-                    {
-                        return; // click is inside the entry
-                    }
-                }
-                commit_any_active_rename(&sl);
+            let entry = find_active_rename_entry(&sl).or_else(|| pane::find_tab_rename_entry(&win));
+            if let Some(entry) = entry {
+                let allocation = entry.allocation();
+                commit_inline_rename_for_click(
+                    win.translate_coordinates(&entry, x, y),
+                    allocation.width(),
+                    allocation.height(),
+                    || entry.emit_activate(),
+                );
             }
         });
         window.add_controller(click_anywhere);
@@ -3163,29 +3159,17 @@ fn find_active_rename_entry(sidebar_list: &gtk::ListBox) -> Option<gtk::Entry> {
     None
 }
 
-/// Find any active rename Entry in the sidebar and trigger its activate signal to commit.
-fn commit_any_active_rename(sidebar_list: &gtk::ListBox) {
-    let mut row = sidebar_list.first_child();
-    while let Some(r) = row {
-        // Walk into the row's children to find a gtk::Entry
-        fn find_entry(widget: &gtk::Widget) -> Option<gtk::Entry> {
-            if let Some(entry) = widget.downcast_ref::<gtk::Entry>() {
-                return Some(entry.clone());
-            }
-            let mut child = widget.first_child();
-            while let Some(c) = child {
-                if let Some(entry) = find_entry(&c) {
-                    return Some(entry);
-                }
-                child = c.next_sibling();
-            }
-            None
-        }
-        if let Some(entry) = find_entry(&r) {
-            entry.emit_activate();
-            return;
-        }
-        row = r.next_sibling();
+fn commit_inline_rename_for_click(
+    translated_click: Option<(f64, f64)>,
+    entry_width: i32,
+    entry_height: i32,
+    commit: impl FnOnce(),
+) {
+    let click_is_inside = translated_click.is_some_and(|(x, y)| {
+        x >= 0.0 && y >= 0.0 && x <= entry_width as f64 && y <= entry_height as f64
+    });
+    if !click_is_inside {
+        commit();
     }
 }
 
@@ -6198,7 +6182,7 @@ fn show_desktop_notification(state: &State, request: DesktopNotificationRequest)
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use super::glib;
@@ -6207,8 +6191,9 @@ mod tests {
     use super::ToVariant;
     use super::{
         browser_command_requires_existing_target, build_window_css,
-        clamp_workspace_insert_index_for_pinning, desktop_notification_action_from_signal,
-        desktop_notification_actions, desktop_notification_activation_token_from_signal,
+        clamp_workspace_insert_index_for_pinning, commit_inline_rename_for_click,
+        desktop_notification_action_from_signal, desktop_notification_actions,
+        desktop_notification_activation_token_from_signal,
         desktop_notification_closed_id_from_signal, desktop_notification_id_from_response,
         directional_neighbor_score, favorites_prefix_len, find_leaf_pane, font_size_after_delta,
         ghostty_prefers_dark, gtk_system_prefers_dark_from_raw, has_unread,
@@ -6505,6 +6490,21 @@ mod tests {
             [HOST_ENTRY_CSS_CLASS, WORKSPACE_RENAME_ENTRY_CSS_CLASS]
         );
         assert!(BASE_CSS.contains(".limux-ws-rename-entry"));
+    }
+
+    #[test]
+    fn outside_rename_click_commits_while_inside_click_preserves_editor() {
+        for (click, should_commit) in [
+            (Some((0.0, 0.0)), false),
+            (Some((120.0, 32.0)), false),
+            (Some((-0.1, 16.0)), true),
+            (Some((60.0, 32.1)), true),
+            (None, true),
+        ] {
+            let entry_present = Cell::new(true);
+            commit_inline_rename_for_click(click, 120, 32, || entry_present.set(false));
+            assert_eq!(entry_present.get(), !should_commit, "click: {click:?}");
+        }
     }
 
     #[test]
